@@ -1,0 +1,1425 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Отчётность — макет</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<script>
+  tailwind.config = { theme: { extend: { fontFamily: { sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'] } } } };
+</script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
+<style>
+  html, body { background: #f1f5f9; }
+  .num { font-variant-numeric: tabular-nums; }
+  .grid > * { min-width: 0; }
+  body { overflow-x: hidden; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { scrollbar-width: none; }
+  @media print {
+    .no-print { display: none !important; }
+    html, body { background: #fff; }
+    .print-card { box-shadow: none !important; border: 1px solid #e2e8f0; }
+  }
+</style>
+</head>
+<body class="font-sans text-slate-800 antialiased">
+<div id="root"></div>
+<script>
+/* Tenderlink «Отчётность» — кликабельный макет по ТЗ 20.10.2026 (фазы 1–2).
+   Без бэкенда: данные живут в памяти страницы. Все остатки считаются из журнала операций,
+   как требует ТЗ (с. 19–20): ни одной ручной цифры, кроме исторической базы проекта. */
+const { useState, useEffect, useContext, createContext } = React;
+const html = htm.bind(React.createElement);
+const cx = (...a) => a.filter(Boolean).join(' ');
+
+/* ---------- Деньги: целые минимальные единицы ---------- */
+// USD — в центах, UZS — в сумах. Курс хранится у каждой операции; курс ЦБ — только подсказка.
+const RATE = 12500;
+const CB_RATE = 12480;
+const nf0 = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
+const nf2 = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const usd = c => (c < 0 ? '−' : '') + '$' + (Math.abs(c) % 100 ? nf2 : nf0).format(Math.abs(c) / 100);
+const uzs = v => (v < 0 ? '−' : '') + nf0.format(Math.abs(v)) + ' сум';
+const money = (cur, v) => (cur === 'USD' ? usd(v) : uzs(v));
+const toUsd = (cur, v, rate = RATE) => (cur === 'USD' ? v : Math.round((v * 100) / rate));
+const pct = (a, b) => (b ? Math.round((a * 100) / b) : 0);
+const TODAY = '2026-10-30';
+const fd = d => d.slice(8, 10) + '.' + d.slice(5, 7);
+const fdy = d => fd(d) + '.' + d.slice(0, 4);
+const daysLate = d => Math.round((new Date(TODAY) - new Date(d)) / 864e5);
+const uid = p => p + Math.random().toString(36).slice(2, 8);
+
+/* ---------- Справочники ---------- */
+const P = {
+  owner: { name: 'Джурабек Ганиев', short: 'Джурабек', label: 'Генподрядчик · владелец', org: 'Ganiev Development' },
+  partner: { name: 'Азиз Каримов', short: 'Азиз', label: 'Партнёр 50%' },
+  client: { name: 'Тимур Алиев', short: 'Тимур', label: 'Клиент' },
+  bakh: { name: 'Бахтиёр Рахимов', short: 'Бахтиёр', label: 'Прораб' },
+  ulug: { name: 'Улугбек Саидов', short: 'Улугбек', label: 'Закупщик' },
+  sherzod: { name: 'Шерзод Тошматов', short: 'Шерзод', dat: 'Шерзоду', label: 'Бригадир, кладка' },
+  nodir: { name: 'Нодир Хамидов', short: 'Нодир', dat: 'Нодиру', label: 'Мастер-плиточник' },
+  ilhom: { name: 'Ильхом Абдуллаев', short: 'Ильхом', dat: 'Ильхому', label: 'Электрик' },
+};
+const TYPES = ['Материал', 'Работа', 'Питание', 'Под ключ', 'Доставка', 'Техника и инструмент', 'Мусор', 'Охрана', 'Коммунальные и госплатежи', 'Аванс субподрядчику', 'Прочее'];
+const UNITS = ['шт', 'м²', 'м³', 'м.п.', 'кг', 'мешок', 'машина', 'моточас', 'день', 'точка', 'комплект', 'услуга', 'чел.-день'];
+
+// Смета Salom Penthouse: цена для клиента (p) и себестоимость (c) за единицу, $. Итог 450 000 / 337 500.
+const SEC = [
+  { id: 'dem', name: 'Демонтаж и подготовка', stage: 1, lines: [
+    { n: 'Демонтаж перегородок', t: 'Работа', q: 240, u: 'м²', p: 25, c: 18.75 },
+    { n: 'Вывоз мусора', t: 'Мусор', q: 30, u: 'машина', p: 400, c: 300 }] },
+  { id: 'floor', name: 'Стяжка пола', stage: 1, lines: [
+    { n: 'Стяжка пола 70 мм', t: 'Работа', q: 700, u: 'м²', p: 32, c: 24 },
+    { n: 'Пескобетон М300', t: 'Материал', q: 400, u: 'мешок', p: 14, c: 10.5 }] },
+  { id: 'wall', name: 'Стены и перегородки', stage: 2, lines: [
+    { n: 'Кладка перегородок из газоблока', t: 'Работа', q: 300, u: 'м²', p: 8, c: 6 },
+    { n: 'Газоблок D500 с клеем', t: 'Материал', q: 300, u: 'м²', p: 28, c: 21 },
+    { n: 'Штукатурка стен по маякам', t: 'Работа', q: 2560, u: 'м²', p: 20, c: 15 }] },
+  { id: 'el', name: 'Электрика', stage: 2, lines: [
+    { n: 'Электромонтаж', t: 'Работа', q: 320, u: 'точка', p: 25, c: 18.75 },
+    { n: 'Кабель, автоматика, щиты', t: 'Материал', q: 1, u: 'комплект', p: 33000, c: 24750 }] },
+  { id: 'plumb', name: 'Сантехника', stage: 2, lines: [
+    { n: 'Монтаж сантехники', t: 'Работа', q: 48, u: 'точка', p: 250, c: 187.5 },
+    { n: 'Трубы, коллекторы, приборы', t: 'Материал', q: 1, u: 'комплект', p: 24000, c: 18000 }] },
+  { id: 'tile', name: 'Плитка и кафель', stage: 3, lines: [
+    { n: 'Укладка плитки', t: 'Работа', q: 1800, u: 'м²', p: 10, c: 8, vis: true },
+    { n: 'Кафель, керамогранит', t: 'Материал', q: 1800, u: 'м²', p: 19, c: 13.75 },
+    { n: 'Клей и затирка', t: 'Материал', q: 1800, u: 'м²', p: 1, c: 0.75 }] },
+  { id: 'paint', name: 'Малярные работы', stage: 3, lines: [
+    { n: 'Шпаклёвка и покраска', t: 'Работа', q: 3200, u: 'м²', p: 12, c: 9 },
+    { n: 'Краска, шпаклёвка, грунт', t: 'Материал', q: 1, u: 'комплект', p: 32600, c: 24450 }] },
+  { id: 'ceil', name: 'Потолки', stage: 3, lines: [
+    { n: 'Потолки из гипсокартона', t: 'Работа', q: 600, u: 'м²', p: 55, c: 41.25 }] },
+  { id: 'doors', name: 'Двери, окна, терраса', stage: 4, lines: [
+    { n: 'Межкомнатные двери', t: 'Материал', q: 16, u: 'шт', p: 1250, c: 937.5 },
+    { n: 'Терраса: деревянный настил', t: 'Работа', q: 110, u: 'м²', p: 400, c: 300 }] },
+  { id: 'common', name: 'Общие: охрана, питание, доставка', stage: 4, lines: [
+    { n: 'Охрана объекта', t: 'Охрана', q: 240, u: 'день', p: 50, c: 37.5 },
+    { n: 'Питание бригад', t: 'Питание', q: 1, u: 'комплект', p: 16000, c: 12000 },
+    { n: 'Доставка и техника', t: 'Доставка', q: 1, u: 'комплект', p: 15000, c: 11250 }] },
+];
+const SECN = Object.fromEntries(SEC.map(s => [s.id, s.name]));
+const SEC_STAGE = Object.fromEntries(SEC.map(s => [s.id, s.stage]));
+const secSum = (s, k) => s.lines.reduce((a, l) => a + Math.round(l.q * l[k] * 100), 0);
+
+const STAGES = [
+  { id: 1, name: 'Демонтаж и стяжка', due: '2026-09-15', fact: 3420000 },
+  { id: 2, name: 'Стены и инженерия', due: '2026-10-15', fact: 9287000 },
+  { id: 3, name: 'Чистовые: плитка, малярные, потолки', due: '2026-11-30', fact: 5002900 },
+  { id: 4, name: 'Двери, окна, терраса, общие', due: '2026-12-25', fact: 645000 },
+];
+const stagePlan = (id, k) => SEC.filter(s => s.stage === id).reduce((a, s) => a + secSum(s, k), 0);
+
+// Договоры проекта: цепочка клиент → генподрядчик → прораб → бригада.
+const CT = {
+  client: { from: 'client', to: 'owner', parent: null, title: 'СМР под ключ', model: 'Под ключ (фикс)', short: '$450 000' },
+  design: { from: 'client', to: 'owner', parent: null, title: 'Дизайн-проект', model: 'Под ключ (фикс)', short: '$11 500' },
+  bakh: { from: 'owner', to: 'bakh', parent: 'client', title: 'Прораб объекта', model: '% от расходов + подотчёт', short: '10% от принятых' },
+  sherzod: { from: 'bakh', to: 'sherzod', parent: 'bakh', title: 'Кладка перегородок', model: 'Фикс за объём (сдельная)', short: '60 000 сум/м²', unit: 'м²', total: 300, rate: 60000, cur: 'UZS', receiver: 'bakh', section: 'wall', due: '2026-11-15' },
+  nodir: { from: 'owner', to: 'nodir', parent: 'client', title: 'Укладка плитки', model: 'Фикс за объём (сдельная)', short: '$8/м²', unit: 'м²', total: 1800, rate: 800, cur: 'USD', receiver: 'owner', section: 'tile', due: '2026-11-30' },
+  ilhom: { from: 'owner', to: 'ilhom', parent: 'client', title: 'Электрика: щит и освещение', model: 'Под ключ (фикс)', short: '$3 000', cur: 'USD', receiver: 'owner', section: 'el', due: '2026-11-10' },
+  partner: { from: 'owner', to: 'partner', parent: 'client', title: 'Доля прибыли', model: 'Доля прибыли 50/50', short: '50 / 50' },
+};
+const CT_ORDER = ['client', 'bakh', 'sherzod', 'nodir', 'ilhom', 'partner', 'design'];
+const C_STEPS = ['черновик', 'предложен', 'согласован', 'в работе', 'завершён'];
+const RIGHTS = [
+  'Видеть смету, бюджет и общие расходы проекта',
+  'Видеть условия договора уровнем выше',
+  'Видеть расходы других участников своего уровня',
+  'Создавать расходы, запросы денег и траншей',
+  'Подтверждать расходы и принимать работы своих исполнителей',
+  'Нанимать исполнителей и заключать с ними договоры',
+  'Платить поставщикам напрямую от имени проекта',
+];
+
+const KITCHEN = {
+  code: 'KHN4M9', title: 'Кухня под ключ', addr: 'Ташкент, Юнусабад 19-4, кв. 27', client: 'Малика Юсупова', start: '2026-11-03', end: '2026-12-15', total: 1480000,
+  lines: [['Демонтаж старой кухни и вывоз мусора', 1, 'услуга', 60000], ['Электрика: розетки и подсветка', 12, 'точка', 8000], ['Сантехника: мойка, посудомоечная машина', 1, 'комплект', 54000], ['Фартук: плитка', 6, 'м²', 7000], ['Кухонный гарнитур с монтажом', 1, 'комплект', 1120000], ['Монтаж техники и уборка', 1, 'услуга', 108000]],
+  tranches: [['Аванс при согласовании', 40, 592000, '2026-11-03', 'Закупка гарнитура, старт демонтажа'], ['После черновых работ', 30, 444000, '2026-11-17', 'Демонтаж, электрика, сантехника — с фото'], ['После сдачи кухни', 30, 444000, '2026-12-15', 'Гарнитур, фартук, техника — приёмка с фото']],
+};
+
+/* ---------- Начальное состояние (журнал операций) ---------- */
+function mkE(id, who, date, sec, type, name, qty, unit, price, cur, vendor, x = {}) {
+  const amount = Math.round(qty * price);
+  const e = { id, who, date, sec, type, name, qty, unit, price, cur, vendor, amount, rate: cur === 'UZS' ? RATE : null,
+    usd: toUsd(cur, amount), payer: 'pod', receipt: true, status: 'sent', acc: 0, comment: '', ...x };
+  if (e.status === 'accepted' && !e.acc) e.acc = e.usd;
+  return e;
+}
+function init() {
+  return {
+    expenses: [
+      mkE('e12', 'ulug', '2026-10-29', 'tile', 'Материал', 'Клей плиточный Unis 2000', 40, 'мешок', 700, 'USD', 'Дунёбунё'),
+      mkE('e9', 'bakh', '2026-10-29', 'common', 'Прочее', 'Саморезы', 3, 'кг', 500, 'USD', 'Строймаркет Чиланзар', { status: 'draft' }),
+      mkE('e7', 'bakh', '2026-10-28', 'tile', 'Материал', 'Затирка Ceresit CE40', 20, 'мешок', 1250, 'USD', 'Дунёбунё'),
+      mkE('e8', 'bakh', '2026-10-28', 'dem', 'Мусор', 'Вывоз мусора, зил', 1, 'машина', 15000, 'USD', 'Частник, зил', { status: 'returned', receipt: false, comment: 'Нет фото чека или накладной — приложите' }),
+      mkE('e10', 'owner', '2026-10-27', 'doors', 'Материал', 'Двери межкомнатные, предоплата 50%', 8, 'шт', 62500, 'USD', 'Doors Premium', { status: 'accepted', payer: 'direct' }),
+      mkE('e11', 'ulug', '2026-10-27', 'paint', 'Материал', 'Грунтовка Knauf Tiefengrund', 10, 'шт', 1800, 'USD', 'Knauf-центр', { status: 'rejected', comment: 'Дубль: эта накладная уже внесена 21.10' }),
+      mkE('e6', 'bakh', '2026-10-26', 'el', 'Материал', 'Кабель ВВГ 3×2,5', 300, 'м.п.', 118, 'USD', 'Elektromir', { status: 'accepted' }),
+      mkE('e5', 'bakh', '2026-10-25', 'wall', 'Аванс субподрядчику', 'Аванс: Шерзод, кладка 300 м²', 1, 'услуга', 3000000, 'UZS', 'Бригада Шерзода', { status: 'accepted', receipt: false, auto: true, internal: true }),
+      mkE('e4', 'bakh', '2026-10-24', 'wall', 'Доставка', 'Доставка газоблока, исузу', 1, 'машина', 12000, 'USD', 'Исузу, Рустам', { status: 'accepted' }),
+      mkE('e3', 'bakh', '2026-10-23', 'ceil', 'Материал', 'Профиль для ГКЛ', 100, 'шт', 400, 'USD', 'Knauf-центр', { status: 'partial', acc: 30000, comment: 'Принято 75 шт: 25 шт нет в накладной' }),
+      mkE('e2', 'bakh', '2026-10-22', 'common', 'Питание', 'Питание бригады: 6 чел × 5 дн × 40 000', 30, 'чел.-день', 40000, 'UZS', 'Столовая у объекта', { status: 'accepted' }),
+      mkE('e1', 'bakh', '2026-10-21', 'floor', 'Материал', 'Цемент М400', 60, 'мешок', 650, 'USD', 'Строймаркет Чиланзар', { status: 'accepted' }),
+    ],
+    transfers: [
+      { id: 't1', from: 'owner', to: 'bakh', cur: 'USD', amount: 600000, usd: 600000, purpose: 'Под отчёт', date: '2026-10-01', status: 'received' },
+      { id: 't2', from: 'owner', to: 'bakh', cur: 'USD', amount: 400000, usd: 400000, purpose: 'Под отчёт', date: '2026-10-20', status: 'received' },
+      { id: 't3', from: 'owner', to: 'bakh', cur: 'USD', amount: 200000, usd: 200000, purpose: 'Под отчёт', date: TODAY, status: 'sent' },
+      { id: 't4', from: 'bakh', to: 'sherzod', cur: 'UZS', amount: 3000000, usd: 24000, purpose: 'Аванс по работам', date: '2026-10-25', status: 'received', contract: 'sherzod' },
+      { id: 't5', from: 'owner', to: 'nodir', cur: 'USD', amount: 30000, usd: 30000, purpose: 'Аванс по работам', date: '2026-10-24', status: 'received', contract: 'nodir' },
+      { id: 't6', from: 'owner', to: 'ilhom', cur: 'USD', amount: 120000, usd: 120000, purpose: 'Оплата принятых работ', date: '2026-10-28', status: 'received', contract: 'ilhom' },
+    ],
+    requests: [],
+    works: [
+      { id: 'w1', c: 'sherzod', date: '2026-10-29', vol: 120, photos: 3, video: 1, comment: 'Перегородки 2-го уровня, оси А–В', status: 'pending' },
+      { id: 'w2', c: 'nodir', date: '2026-10-30', vol: 100, photos: 4, video: 0, comment: 'Санузлы 1 и 2: стены и пол', status: 'pending' },
+      { id: 'w3', c: 'ilhom', date: '2026-10-27', stage: 'Щит и слаботочка', fix: 120000, photos: 5, video: 1, comment: 'Этап 1 из 2 по договору', status: 'accepted', res: { accrued: 120000, adv: 0, hold: 0, toPay: 120000 }, payT: true },
+    ],
+    cs: {
+      sherzod: { advance: 3000000, accVol: 0, accrued: 0, advClosed: 0, hold: 0, paid: 0 },
+      nodir: { advance: 30000, accVol: 0, accrued: 0, advClosed: 0, hold: 0, paid: 0 },
+      ilhom: { advance: 0, accrued: 120000, advClosed: 0, hold: 0, paid: 120000 },
+    },
+    rights: {
+      bakh: [false, false, false, true, true, true, false],
+      sherzod: [false, false, false, true, false, false, false],
+      nodir: [false, false, false, true, false, false, false],
+      ilhom: [false, false, false, true, false, false, false],
+    },
+    strict: { client: false, sherzod: false, nodir: true },
+    redactions: [
+      { n: 1, date: '2026-07-05', text: 'Предложение: смета 10 разделов, 4 этапа, 4 транша', st: 'предложен' },
+      { n: 2, date: '2026-07-20', text: 'Согласовано клиентом: $450 000, срок 25.12.2026', st: 'согласован' },
+      { n: 3, date: '2026-10-12', text: 'Срок этапа 3 перенесён на 30.11 — клиент согласовал 14.10', st: 'согласован' },
+    ],
+    tranches: [
+      { n: 1, name: 'Аванс', pct: 30, amount: 13500000, due: '2026-08-01', status: 'closed', got: '2026-08-05', stage: 'старт работ' },
+      { n: 2, name: 'После этапа 1', pct: 30, amount: 13500000, due: '2026-09-20', status: 'reporting', got: '2026-09-20', stage: 'этап 2: стены и инженерия' },
+      { n: 3, name: 'После этапа 2', pct: 25, amount: 11250000, due: '2026-11-15', status: 'plan', stage: 'этап 3: чистовые' },
+      { n: 4, name: 'После сдачи', pct: 15, amount: 6750000, due: '2026-12-25', status: 'plan', stage: 'этап 4 и сдача' },
+    ],
+    report: { status: 'ready' },
+    stageClient: { 1: 'accepted', 2: 'in_work', 3: 'in_work', 4: 'plan' },
+    partners: { owner: 2000000, partner: 1500000 },
+    proposal: { status: 'proposed', login: false, comment: '', at: '' },
+    groupDraft: true,
+  };
+}
+
+/* ---------- Расчёты из журнала ---------- */
+function live(S) {
+  const r = { podFact: 0, podAll: 0, direct: 0, works: 0, received: 0, paidSubs: 0, stage: { 1: 0, 2: 0, 3: 0, 4: 0 } };
+  S.expenses.forEach(e => {
+    if (!e.acc) return;
+    if (e.payer === 'direct') r.direct += e.acc; else { r.podAll += e.acc; if (!e.internal) r.podFact += e.acc; }
+    if (!e.internal) r.stage[SEC_STAGE[e.sec]] += e.acc;
+  });
+  S.works.forEach(w => {
+    if (!w.res) return;
+    const a = toUsd(CT[w.c].cur, w.res.accrued);
+    r.works += a; r.stage[SEC_STAGE[CT[w.c].section]] += a;
+  });
+  S.transfers.forEach(t => {
+    if (t.status !== 'received' || t.from !== 'owner') return;
+    if (t.to === 'bakh') r.received += t.usd; else r.paidSubs += t.usd;
+  });
+  return r;
+}
+const L0 = live(init());
+// Историческая база проекта до периода макета (из Excel Salom Penthouse): калибруем так,
+// чтобы на старте цифры совпали с примерами ТЗ: освоено $183 549, на руках $30 751, остаток $20 700.
+const BASE = {
+  pod: 13924900 - L0.podFact, rep: 13924900 - L0.podAll, direct: 2800000 - L0.direct, works: 1630000 - L0.works,
+  tr: 17000000 - L0.received, paid: 1630000 - L0.paidSubs,
+  stage: Object.fromEntries(STAGES.map(s => [s.id, s.fact - L0.stage[s.id]])),
+};
+const PLAN = 33750000, CONTRACT = 45000000, MARGIN = 11250000;
+
+function salom(S) {
+  const l = live(S);
+  const pod = BASE.pod + l.podFact, direct = BASE.direct + l.direct, works = BASE.works + l.works;
+  const fact = pod + direct + works;
+  const clientRec = S.tranches.filter(t => t.got && t.status !== 'sent').reduce((a, t) => a + t.amount, 0);
+  const transferred = BASE.tr + l.received;
+  const hands = transferred - (BASE.rep + l.podAll);
+  const paidSubs = BASE.paid + l.paidSubs;
+  const withdrawn = S.partners.owner + S.partners.partner;
+  const cash = clientRec - transferred - direct - paidSubs - withdrawn;
+  const inTransit = S.transfers.filter(t => t.from === 'owner' && t.status === 'sent').reduce((a, t) => a + t.usd, 0);
+  const earned = Math.round((fact * MARGIN) / PLAN);
+  const share = Math.round(earned / 2);
+  const review = S.expenses.filter(e => ['sent', 'returned', 'partial'].includes(e.status));
+  const reviewSum = review.reduce((a, e) => a + (e.status === 'partial' ? (e.restRejected ? 0 : e.usd - e.acc) : e.usd), 0);
+  const stages = STAGES.map(s => ({ ...s, factLive: BASE.stage[s.id] + l.stage[s.id], plan: stagePlan(s.id, 'c'), client: stagePlan(s.id, 'p') }));
+  return { pod, direct, works, fact, clientRec, transferred, hands, paidSubs, withdrawn, cash, inTransit, earned, share,
+    progress: (fact * 100) / PLAN, reviewN: S.expenses.filter(e => e.status === 'sent').length, reviewSum, stages };
+}
+
+// Подотчёт исполнителя — 7 показателей (ТЗ с. 12–13).
+function podFor(S, who) {
+  const received = S.transfers.filter(t => t.to === who && t.status === 'received' && t.purpose !== 'Оплата принятых работ').reduce((a, t) => a + t.usd, 0);
+  const ex = S.expenses.filter(e => e.who === who && e.payer === 'pod' && e.status !== 'draft');
+  const paid = ex.reduce((a, e) => a + e.usd, 0);
+  const accepted = ex.reduce((a, e) => a + e.acc, 0);
+  const review = ex.reduce((a, e) => a + (['sent', 'returned'].includes(e.status) ? e.usd : e.status === 'partial' && !e.restRejected ? e.usd - e.acc : 0), 0);
+  const accrued = Math.round(accepted * 0.1); // договор «% от расходов»: 10% × принятые расходы
+  const over = Math.max(0, accepted - received);
+  return { received, paid, balance: received - paid, accepted, review, under: received - accepted, accrued, over, toPay: accrued + over };
+}
+
+function workCalc(S, w, mode = 'full', vol = w.vol, holdPct = 20) {
+  const c = CT[w.c], cs = S.cs[w.c];
+  const accVol = mode === 'partial' ? vol : w.vol;
+  const accrued = w.fix ? w.fix : accVol * c.rate;
+  const adv = Math.min(Math.max(0, cs.advance - cs.advClosed), accrued);
+  const hold = mode === 'remarks' ? Math.round((accrued * holdPct) / 100) : 0;
+  return { accVol, accrued, adv, hold, toPay: accrued - adv - hold };
+}
+
+/* ---------- ИИ: разбор одной строки (в релизе — Claude API; здесь — правила для демо) ---------- */
+const TYPO = { 'шкатурка': 'штукатурка', 'шкатурки': 'штукатурки', 'шпатлевка': 'шпаклёвка', 'цимент': 'цемент', 'газаблок': 'газоблок', 'кафел': 'кафель', 'кабел': 'кабель', 'плитканинг': 'плитка' };
+const KW = [
+  [/кафел|плитк|керамогранит|затирк/, 'tile', 'Материал'], [/цемент|пескобетон|стяжк/, 'floor', 'Материал'],
+  [/газоблок|кирпич|кладк|штукатур/, 'wall', 'Материал'], [/шпакл|краск|грунт/, 'paint', 'Материал'],
+  [/кабел|провод|автомат|розетк|щит/, 'el', 'Материал'], [/труб|смесител|унитаз|коллектор|сантех/, 'plumb', 'Материал'],
+  [/профил|гкл|гипсокартон|потол/, 'ceil', 'Материал'], [/двер|окн|террас/, 'doors', 'Материал'],
+  [/питани|обед|еда|плов|самс/, 'common', 'Питание'], [/охран/, 'common', 'Охрана'], [/мусор|вывоз/, 'dem', 'Мусор'],
+];
+const TYPE_KW = [[/доставк|исузу|зил|газел|рейс/, 'Доставка'], [/укладк|монтаж|работа/, 'Работа'], [/аренд|перфоратор|миксер/, 'Техника и инструмент']];
+const USD_RE = /(?:по\s*)?(?:\$\s?(\d+(?:[.,]\d+)?)|(\d+(?:[.,]\d+)?)\s?(?:\$|долл[а-яё]*|usd|у\.е\.))/i;
+const UZS_RE = /(?:по\s*)?(\d{1,3}(?:[  ]\d{3})+|\d+(?:[.,]\d+)?)\s?(к|тыс\.?|тысяч[а-яё]*)?\s?(?:сум|сўм|sum)(?=$|[\s,.;])|по\s*(\d+(?:[.,]\d+)?)\s?(к|тыс\.?)(?=$|[\s,.;])/i;
+const QTY_RE = /(\d+(?:[.,]\d+)?)\s?(м2|м²|м3|м³|кв\.?\s?м|м\.\s?п\.?|пог\.?\s?м|шт\.?|штук[а-яё]*|кг|меш[а-яё]*|машин[а-яё]*|рейс[а-яё]*|точ[а-яё]*|чел[а-яё.\-]*|дн[а-яё]*|день|компл[а-яё]*|метр[а-яё]*|м)(?=$|[\s,.;])/i;
+function normUnit(u) {
+  u = u.toLowerCase();
+  if (/^(м2|м²|кв)/.test(u)) return 'м²'; if (/^(м3|м³)/.test(u)) return 'м³';
+  if (/^(м\.|пог|метр)/.test(u) || u === 'м') return 'м.п.'; if (/^шт/.test(u)) return 'шт'; if (u === 'кг') return 'кг';
+  if (/^меш/.test(u)) return 'мешок'; if (/^(маш|рейс)/.test(u)) return 'машина'; if (/^точ/.test(u)) return 'точка';
+  if (/^чел/.test(u)) return 'чел.-день'; if (/^(дн|день)/.test(u)) return 'день'; if (/^компл/.test(u)) return 'комплект';
+  return u;
+}
+const cap = s => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const capWords = s => s.split(/\s+/).filter(Boolean).map(cap).join(' ');
+function parseItem(raw) {
+  const fixes = [];
+  const s = raw.replace(/[a-zа-яё]+/gi, w => { const f = TYPO[w.toLowerCase()]; if (f) { fixes.push(w + ' → ' + f); return f; } return w; });
+  const low = s.toLowerCase();
+  let price = null, cur = 'USD', pa = -1, pb = -1, m;
+  if ((m = USD_RE.exec(low))) { price = Math.round(parseFloat((m[1] || m[2]).replace(',', '.')) * 100); pa = m.index; pb = pa + m[0].length; }
+  else if ((m = UZS_RE.exec(low))) { price = Math.round(parseFloat((m[1] || m[3]).replace(/[\s ]/g, '').replace(',', '.')) * ((m[2] || m[4]) ? 1000 : 1)); cur = 'UZS'; pa = m.index; pb = pa + m[0].length; }
+  const masked = pa >= 0 ? low.slice(0, pa) + ' '.repeat(pb - pa) + low.slice(pb) : low;
+  let qty = 1, unit = /доставк|исузу|зил/.test(low) ? 'машина' : 'шт', qa = -1, qb = -1;
+  if ((m = QTY_RE.exec(masked))) { qty = parseFloat(m[1].replace(',', '.')); unit = normUnit(m[2]); qa = m.index; qb = qa + m[0].length; }
+  const starts = [qa, pa].filter(i => i >= 0), ends = [qb, pb].filter(i => i >= 0);
+  let name = s.slice(0, starts.length ? Math.min(...starts) : s.length).replace(/\s+по\s*$/i, '').trim();
+  let vendor = ends.length ? s.slice(Math.max(...ends)).replace(/^[\s,.\-—]+/, '').trim() : '';
+  if (!name && vendor) { name = vendor; vendor = ''; }
+  const kw = KW.find(([re]) => re.test(low));
+  let type = kw ? kw[2] : 'Прочее';
+  const tk = TYPE_KW.find(([re]) => re.test(low)); if (tk) type = tk[1];
+  const sec = kw ? kw[1] : tk && tk[1] === 'Доставка' ? 'common' : '';
+  return { id: uid('i'), name: cap(name) || 'Без названия', qty, unit, price: price ?? 0, cur, rate: RATE, vendor: capWords(vendor), sec, type, fixes,
+    why: kw ? 'по слову «' + low.match(kw[0])[0] + '»' : tk ? 'по слову «' + low.match(tk[0])[0] + '»' : '', noPrice: price == null };
+}
+const parseLine = t => t.split(/;|\n|,\s+(?=[^\d\s])/).map(x => x.trim()).filter(Boolean).map(parseItem);
+
+/* ---------- Контекст ---------- */
+const Ctx = createContext(null);
+const useC = () => useContext(Ctx);
+
+/* ---------- Иконки (контуры в стиле Lucide) ---------- */
+const IC = {
+  plus: ['M12 5v14', 'M5 12h14'], check: ['M20 6 9 17l-5-5'], x: ['M18 6 6 18', 'M6 6l12 12'], right: ['m9 18 6-6-6-6'], left: ['m15 18-6-6 6-6'],
+  down: ['m6 9 6 6 6-6'], lock: ['M7 11V7a5 5 0 0 1 10 0v4', 'M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z'],
+  camera: ['M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z', 'M12 16a3 3 0 1 0 0-6 3 3 0 0 0 0 6z'],
+  mic: ['M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z', 'M19 10v2a7 7 0 0 1-14 0v-2', 'M12 19v3'],
+  undo: ['M9 14 4 9l5-5', 'M4 9h10.5a5.5 5.5 0 0 1 0 11H11'],
+  alert: ['M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z', 'M12 9v4', 'M12 17h.01'],
+  download: ['M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4', 'm7 10 5 5 5-5', 'M12 15V3'], send: ['m22 2-7 20-4-9-9-4z', 'M22 2 11 13'],
+  spark: ['M12 3l1.9 5.8L20 10.7l-6.1 1.9L12 18.5l-1.9-5.9L4 10.7l6.1-1.9z', 'M19 3v4', 'M21 5h-4'],
+  wallet: ['M21 12V7H5a2 2 0 0 1 0-4h14v4', 'M3 5v14a2 2 0 0 0 2 2h16v-5', 'M18 12a2 2 0 0 0 0 4h4v-4z'],
+  file: ['M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z', 'M14 2v6h6', 'M8 13h8', 'M8 17h5'],
+  users: ['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', 'M22 21v-2a4 4 0 0 0-3-3.9', 'M16 3.1a4 4 0 0 1 0 7.8'],
+  clock: ['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z', 'M12 6v6l4 2'], eye: ['M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z', 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z'],
+  layers: ['m12 2 10 5-10 5L2 7z', 'm2 17 10 5 10-5', 'm2 12 10 5 10-5'], home: ['m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z', 'M9 22V12h6v10'],
+  receipt: ['M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1z', 'M16 8H8', 'M16 12H8', 'M13 16H8'],
+  chart: ['M3 3v18h18', 'M18 17V9', 'M13 17V5', 'M8 17v-3'], link: ['M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7', 'M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7'],
+  hand: ['M18 11V6a2 2 0 0 0-4 0v5', 'M14 10V4a2 2 0 0 0-4 0v6', 'M10 10.5V6a2 2 0 0 0-4 0v8', 'M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-5.9-2.4L3.3 16.8a2 2 0 0 1 2.8-2.8L8 15'],
+  inbox: ['M22 12h-6l-2 3h-4l-2-3H2', 'M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z'],
+  refresh: ['M3 12a9 9 0 0 1 15-6.7L21 8', 'M21 3v5h-5', 'M21 12a9 9 0 0 1-15 6.7L3 16', 'M3 21v-5h5'],
+  printer: ['M6 9V2h12v7', 'M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2', 'M6 14h12v8H6z'],
+};
+function Icon({ n, s = 16, className }) {
+  return html`<svg width=${s} height=${s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className=${cx('shrink-0', className)}>
+    ${(IC[n] || []).map((d, i) => html`<path key=${i} d=${d} />`)}</svg>`;
+}
+
+/* ---------- Примитивы интерфейса ---------- */
+// Цвета по ТЗ: оранжевый — действие, зелёный — подтверждено, янтарный — ожидает, фиолетовый — договор, красный — риск/просрочка.
+const TONE = {
+  slate: 'bg-slate-100 text-slate-600', amber: 'bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200',
+  green: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200', orange: 'bg-orange-50 text-orange-700 ring-1 ring-inset ring-orange-200',
+  red: 'bg-red-50 text-red-700 ring-1 ring-inset ring-red-200', violet: 'bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-200',
+};
+function Chip({ tone = 'slate', icon, children, className }) {
+  return html`<span className=${cx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap', TONE[tone], className)}>${icon && html`<${Icon} n=${icon} s=${11} />`}${children}</span>`;
+}
+const EXP_ST = { draft: ['Черновик', 'slate'], sent: ['На проверке', 'amber'], accepted: ['Принят', 'green'], partial: ['Принят частично', 'green'], returned: ['Возвращён', 'orange'], rejected: ['Отклонён', 'red'] };
+const ExpChip = ({ s }) => html`<${Chip} tone=${EXP_ST[s][1]}>${EXP_ST[s][0]}<//>`;
+
+const BTN = {
+  orange: 'bg-orange-600 text-white hover:bg-orange-700 shadow-sm', ghost: 'bg-white text-slate-700 ring-1 ring-inset ring-slate-300 hover:bg-slate-50',
+  red: 'bg-white text-red-700 ring-1 ring-inset ring-red-200 hover:bg-red-50', green: 'bg-emerald-600 text-white hover:bg-emerald-700',
+  violet: 'bg-white text-violet-700 ring-1 ring-inset ring-violet-200 hover:bg-violet-50', dark: 'bg-slate-900 text-white hover:bg-slate-800',
+  link: 'text-orange-700 hover:text-orange-800 px-0',
+};
+function Btn({ tone = 'orange', size = 'md', icon, onClick, disabled, full, className, children, title }) {
+  const sz = { sm: 'h-8 px-3 text-xs gap-1.5', md: 'h-10 px-4 text-sm gap-2', lg: 'h-12 px-5 text-[15px] gap-2' }[size];
+  return html`<button title=${title} disabled=${disabled} onClick=${onClick} className=${cx('inline-flex items-center justify-center rounded-xl font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed', sz, BTN[tone], full && 'w-full', className)}>
+    ${icon && html`<${Icon} n=${icon} s=${size === 'sm' ? 14 : 16} />`}${children}</button>`;
+}
+function Card({ title, sub, right, children, className, pad = true }) {
+  return html`<section className=${cx('print-card bg-white rounded-2xl ring-1 ring-slate-200/80 shadow-sm', className)}>
+    ${(title || right) && html`<div className="flex items-start gap-3 px-4 pt-4 sm:px-5">
+      <div className="flex-1 min-w-0"><h3 className="font-semibold text-slate-900 text-[15px]">${title}</h3>${sub && html`<p className="text-xs text-slate-500 mt-0.5">${sub}</p>`}</div>${right}</div>`}
+    <div className=${pad ? 'p-4 sm:p-5' : ''}>${children}</div></section>`;
+}
+function Stat({ label, value, hint, tone, big }) {
+  const c = { green: 'text-emerald-700', amber: 'text-amber-700', red: 'text-red-700', violet: 'text-violet-700', orange: 'text-orange-700' }[tone] || 'text-slate-900';
+  return html`<div className="min-w-0"><div className="text-[11px] uppercase tracking-wide text-slate-500 font-medium">${label}</div>
+    <div className=${cx('num font-semibold mt-0.5', big ? 'text-2xl' : 'text-lg', c)}>${value}</div>${hint && html`<div className="text-xs text-slate-500 mt-0.5">${hint}</div>`}</div>`;
+}
+function Bar({ v, tone = 'green', h = 'h-2', marker }) {
+  const c = { green: 'bg-emerald-500', amber: 'bg-amber-400', red: 'bg-red-500', violet: 'bg-violet-500', orange: 'bg-orange-500', slate: 'bg-slate-400' }[tone];
+  return html`<div className=${cx('relative w-full rounded-full bg-slate-100 overflow-hidden', h)}><div className=${cx('h-full rounded-full', c)} style=${{ width: Math.min(100, Math.max(0, v)) + '%' }}></div>
+    ${marker != null && html`<div className="absolute top-0 bottom-0 w-0.5 bg-slate-700" style=${{ left: marker + '%' }}></div>`}</div>`;
+}
+function Avatar({ who, s = 'w-8 h-8' }) {
+  const colors = { owner: 'bg-slate-900', partner: 'bg-slate-600', client: 'bg-violet-600', bakh: 'bg-orange-600', ulug: 'bg-sky-600', sherzod: 'bg-emerald-600', nodir: 'bg-teal-600', ilhom: 'bg-amber-600' };
+  const p = P[who] || { name: '?' };
+  return html`<div className=${cx('rounded-full text-white text-xs font-semibold grid place-items-center shrink-0', s, colors[who] || 'bg-slate-500')}>${p.name.split(' ').map(x => x[0]).join('').slice(0, 2)}</div>`;
+}
+function Seg({ value, onChange, options, small }) {
+  return html`<div className=${cx('inline-flex rounded-xl bg-slate-100 p-1', small ? 'text-xs' : 'text-sm')}>
+    ${options.map(([v, l]) => html`<button key=${v} onClick=${() => onChange(v)} className=${cx('rounded-lg px-3 font-medium whitespace-nowrap', small ? 'py-1' : 'py-1.5', value === v ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-800')}>${l}</button>`)}</div>`;
+}
+const inputCls = 'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-orange-500';
+function Receipt({ e, big }) {
+  const w = big ? 176 : 40, h = big ? 240 : 54;
+  if (!e.receipt) return html`<div style=${{ width: w, height: h }} className="shrink-0 rounded-md border border-dashed border-slate-300 bg-slate-50 text-slate-400 grid place-items-center text-[9px] text-center leading-tight">${e.auto ? 'авто' : 'нет чека'}</div>`;
+  return html`<svg width=${w} height=${h} viewBox="0 0 40 54" className="shrink-0 rounded-[4px] ring-1 ring-slate-200 shadow-sm bg-white">
+    <path d="M0 0h40v50l-3.3 4-3.4-4-3.3 4-3.4-4-3.3 4-3.3-4-3.4 4-3.3-4-3.4 4L3.4 50 0 54z" fill="#fffdf5" />
+    <text x="20" y="7" fontSize="3.6" textAnchor="middle" fill="#334155" fontWeight="700">${(e.vendor || 'Чек').slice(0, 16)}</text>
+    ${[13, 17, 21, 25, 29].map((y, i) => html`<g key=${y}><rect x="4" y=${y} width=${18 - i * 2} height="1.4" rx=".7" fill="#cbd5e1" /><rect x="29" y=${y} width="7" height="1.4" rx=".7" fill="#cbd5e1" /></g>`)}
+    <line x1="4" y1="35" x2="36" y2="35" stroke="#94a3b8" strokeWidth=".4" strokeDasharray="1 1" />
+    <text x="20" y="43" fontSize="4.6" textAnchor="middle" fill="#0f172a" fontWeight="700">${money(e.cur, e.amount)}</text></svg>`;
+}
+function Photo({ i, label, video }) {
+  const g = [['#fde68a', '#f59e0b'], ['#bae6fd', '#0284c7'], ['#d9f99d', '#65a30d'], ['#fecaca', '#dc2626'], ['#ddd6fe', '#7c3aed']][i % 5];
+  return html`<div className="relative w-20 h-16 rounded-lg overflow-hidden shrink-0" style=${{ background: `linear-gradient(135deg, ${g[0]}, ${g[1]})` }}>
+    <div className="absolute inset-x-0 bottom-0 h-1/2 bg-black/10"></div>
+    <div className="absolute left-2 bottom-1.5 text-[10px] font-semibold text-white drop-shadow">${label}</div>
+    ${video && html`<div className="absolute inset-0 grid place-items-center"><div className="w-6 h-6 rounded-full bg-white/90 grid place-items-center text-slate-800 text-[10px]">▶</div></div>`}</div>`;
+}
+function Note({ children, tone = 'slate', icon = 'alert' }) {
+  const c = { slate: 'bg-slate-50 text-slate-600 ring-slate-200', amber: 'bg-amber-50 text-amber-900 ring-amber-200', red: 'bg-red-50 text-red-800 ring-red-200', green: 'bg-emerald-50 text-emerald-900 ring-emerald-200', violet: 'bg-violet-50 text-violet-900 ring-violet-200', orange: 'bg-orange-50 text-orange-900 ring-orange-200' }[tone];
+  return html`<div className=${cx('flex gap-2 rounded-xl px-3 py-2.5 text-xs ring-1 ring-inset leading-relaxed', c)}><${Icon} n=${icon} s=${14} className="mt-0.5" /><div className="min-w-0">${children}</div></div>`;
+}
+const Row = ({ k, v, strong, tone }) => html`<div className="flex items-baseline justify-between gap-3 py-1.5 text-sm">
+  <span className="text-slate-500">${k}</span><span className=${cx('num text-right', strong && 'font-semibold', tone === 'green' ? 'text-emerald-700' : tone === 'red' ? 'text-red-700' : tone === 'amber' ? 'text-amber-700' : 'text-slate-900')}>${v}</span></div>`;
+
+/* ---------- Модальное окно и уведомление ---------- */
+function Modal() {
+  const { modal } = useC();
+  return modal ? html`<${ModalBox} key=${modal._k} modal=${modal} />` : null;
+}
+function ModalBox({ modal }) {
+  const { ask } = useC();
+  const [vals, setVals] = useState(() => Object.fromEntries((modal.fields || []).map(f => [f.key, f.value ?? ''])));
+  const fields = (modal.fields || []).filter(f => !f.showIf || f.showIf(vals));
+  const bad = fields.some(f => f.required && !String(vals[f.key] ?? '').trim()) || (modal.validate && modal.validate(vals));
+  const set = (k, v) => setVals(o => ({ ...o, [k]: v }));
+  return html`<div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/50 p-0 sm:p-4" onClick=${() => ask(null)}>
+    <div className="w-full sm:max-w-md bg-white rounded-t-2xl sm:rounded-2xl shadow-xl max-h-[90vh] overflow-y-auto" onClick=${e => e.stopPropagation()}>
+      <div className="p-5">
+        <div className="flex items-start gap-3"><h3 className="flex-1 font-semibold text-slate-900">${modal.title}</h3>
+          <button className="text-slate-400 hover:text-slate-700" onClick=${() => ask(null)}><${Icon} n="x" s=${18} /></button></div>
+        ${modal.note && html`<div className="mt-3"><${Note} tone=${modal.noteTone || 'slate'}>${modal.note}<//></div>`}
+        ${modal.body}
+        <div className="mt-4 space-y-3">
+          ${fields.map(f => html`<label key=${f.key} className="block">
+            <span className="text-xs font-medium text-slate-600">${f.label}${f.required && html`<span className="text-red-600"> *</span>`}</span>
+            ${f.type === 'textarea' ? html`<textarea rows="3" className=${cx(inputCls, 'mt-1')} placeholder=${f.placeholder} value=${vals[f.key] ?? ''} onChange=${e => set(f.key, e.target.value)}></textarea>`
+              : f.type === 'select' ? html`<select className=${cx(inputCls, 'mt-1')} value=${vals[f.key] ?? ''} onChange=${e => set(f.key, e.target.value)}>${f.options.map(o => html`<option key=${o} value=${o}>${o}</option>`)}</select>`
+              : html`<input type=${f.type || 'text'} inputMode=${f.type === 'number' ? 'decimal' : undefined} className=${cx(inputCls, 'mt-1 num')} placeholder=${f.placeholder} value=${vals[f.key] ?? ''} onChange=${e => set(f.key, e.target.value)} />`}
+            ${f.hint && html`<span className="block text-[11px] text-slate-500 mt-1">${typeof f.hint === 'function' ? f.hint(vals) : f.hint}</span>`}</label>`)}
+          ${modal.preview && modal.preview(vals)}
+        </div>
+        ${modal.validate && modal.validate(vals) && html`<p className="mt-2 text-xs text-red-700">${modal.validate(vals)}</p>`}
+        <div className="mt-5 flex gap-2 justify-end">
+          <${Btn} tone="ghost" onClick=${() => ask(null)}>${modal.cancel || 'Отмена'}<//>
+          ${modal.onOk && html`<${Btn} tone=${modal.okTone || 'orange'} disabled=${bad} onClick=${() => { modal.onOk(vals); ask(null); }}>${modal.ok || 'Готово'}<//>`}
+        </div>
+      </div></div></div>`;
+}
+function Toast({ t }) {
+  if (!t) return null;
+  return html`<div key=${t.k} className="no-print fixed z-[60] bottom-5 left-1/2 -translate-x-1/2 max-w-[92vw] rounded-2xl bg-slate-900 text-white text-sm px-4 py-3 shadow-xl flex items-center gap-2">
+    <${Icon} n=${t.icon || 'check'} s=${16} className="text-emerald-400" /><span>${t.msg}</span></div>`;
+}
+
+/* ---------- Общие действия (рукопожатие) ---------- */
+function askTransfer(c, { from, to, amount, cur = 'USD', purpose = 'Под отчёт', extra = {}, onDone }) {
+  c.ask({
+    title: 'Передать деньги: ' + P[to].name,
+    note: 'Деньги передаются вне приложения (наличные, карта) — здесь фиксируем факт. Сумма может отличаться от запрошенной. Засчитается, когда получатель нажмёт «Получил».',
+    fields: [
+      { key: 'amount', label: 'Сумма', type: 'number', value: cur === 'USD' ? amount / 100 : amount, required: true },
+      { key: 'cur', label: 'Валюта передачи', type: 'select', options: ['USD', 'UZS'], value: cur },
+      { key: 'rate', label: 'Фактический курс, сум за $1', type: 'number', value: RATE, hint: 'Курс ЦБ ' + nf0.format(CB_RATE) + ' — только подсказка. Хранятся обе суммы и курс.', showIf: v => v.cur === 'UZS' },
+      { key: 'purpose', label: 'Назначение', type: 'select', options: ['Под отчёт', 'Аванс по работам', 'Оплата принятых работ', 'Возмещение расходов', 'Выплата вознаграждения', 'Возврат'], value: purpose },
+    ],
+    validate: v => (+v.amount > 0 ? '' : 'Укажите сумму'),
+    ok: 'Передал',
+    onOk: v => {
+      const amt = v.cur === 'USD' ? Math.round(+v.amount * 100) : Math.round(+v.amount);
+      const rate = +v.rate || RATE;
+      c.act(n => { n.transfers.push({ id: uid('t'), from, to, cur: v.cur, amount: amt, rate: v.cur === 'UZS' ? rate : null, usd: toUsd(v.cur, amt, rate), purpose: v.purpose, date: TODAY, status: 'sent', ...extra }); onDone && onDone(n); });
+      c.say('«Передал» зафиксировано. Ждём «Получил» от ' + P[to].short);
+    },
+  });
+}
+function receive(c, id) {
+  c.act(n => {
+    const t = n.transfers.find(x => x.id === id); t.status = 'received';
+    if (t.work) { const w = n.works.find(x => x.id === t.work); n.cs[w.c].paid += t.amount; w.paid = true; }
+    if (t.contract && t.purpose === 'Аванс по работам') n.cs[t.contract].advance += t.amount;
+    if (t.from === 'bakh' && t.contract) {
+      // Строка в отчёте прораба появляется сама — повторный ввод не нужен (ТЗ с. 16).
+      const adv = t.purpose === 'Аванс по работам';
+      n.expenses.unshift(mkE(uid('e'), 'bakh', TODAY, CT[t.contract].section, adv ? 'Аванс субподрядчику' : 'Работа', (adv ? 'Аванс: ' : 'Оплата принятых работ: ') + P[t.to].short, 1, 'услуга', t.amount, t.cur, P[t.to].short, { status: 'accepted', receipt: false, auto: true, internal: true }));
+    }
+    if (t.req) { const r = n.requests.find(x => x.id === t.req); if (r) r.status = 'done'; }
+  });
+  c.say('«Получил» — операция подтверждена обеими сторонами');
+}
+function acceptWorkModal(c, w, mode) {
+  const { S } = c; const ct = CT[w.c];
+  const calcV = v => workCalc(S, w, mode, Math.min(w.vol, +v.vol || 0), +v.hold || 0);
+  const fields = [];
+  if (mode === 'partial') fields.push({ key: 'vol', label: 'Принимаемый объём, ' + ct.unit + ' (из ' + w.vol + ')', type: 'number', value: Math.round(w.vol * 0.8), required: true });
+  if (mode === 'remarks') { fields.push({ key: 'hold', label: 'Удержание до исправления, %', type: 'number', value: 20 }); }
+  if (mode !== 'full') fields.push({ key: 'comment', label: 'Комментарий', type: 'textarea', required: true, placeholder: mode === 'partial' ? 'Например: 20 м² — неровный шов, переделать' : 'Например: окна — исправить цвет откосов' });
+  c.ask({
+    title: { full: 'Принять полностью', partial: 'Принять частично', remarks: 'Принять с замечаниями' }[mode] + ': ' + ct.title,
+    fields,
+    preview: v => { const r = calcV(v); return html`<div className="rounded-xl bg-slate-50 ring-1 ring-slate-200 px-3 py-2">
+      ${!w.fix && html`<${Row} k="Начислено" v=${r.accVol + ' ' + ct.unit + ' × ' + money(ct.cur, ct.rate) + ' = ' + money(ct.cur, r.accrued)} />`}
+      ${w.fix && html`<${Row} k="Начислено за этап" v=${money(ct.cur, r.accrued)} />`}
+      <${Row} k="Зачёт аванса" v=${'− ' + money(ct.cur, r.adv)} />
+      ${r.hold > 0 && html`<${Row} k="Удержание до исправления" v=${'− ' + money(ct.cur, r.hold)} tone="amber" />`}
+      <${Row} k="К оплате" v=${money(ct.cur, r.toPay)} strong tone="green" /></div>`; },
+    validate: v => (mode === 'partial' && !(+v.vol > 0 && +v.vol <= w.vol) ? 'Объём от 1 до ' + w.vol : ''),
+    ok: 'Принять',
+    onOk: v => {
+      const r = calcV(v);
+      c.act(n => {
+        const ww = n.works.find(x => x.id === w.id); const cs = n.cs[w.c];
+        ww.status = mode === 'full' ? 'accepted' : mode; ww.res = { ...r, comment: v.comment || '' };
+        cs.accVol = (cs.accVol || 0) + r.accVol; cs.accrued += r.accrued; cs.advClosed += r.adv; cs.hold += r.hold;
+        if (ct.section === 'wall' || ct.section === 'el') n.report.touched = true;
+      });
+      c.say('Принято: начислено ' + money(ct.cur, r.accrued) + ', к оплате ' + money(ct.cur, r.toPay));
+    },
+  });
+}
+function returnWorkModal(c, w) {
+  c.ask({ title: 'Вернуть работу: ' + CT[w.c].title, fields: [{ key: 'comment', label: 'Что исправить', type: 'textarea', required: true, placeholder: 'Возврат — только с комментарием' }], ok: 'Вернуть', okTone: 'dark',
+    onOk: v => { c.act(n => { const ww = n.works.find(x => x.id === w.id); ww.status = 'returned'; ww.res = null; ww.back = v.comment; }); c.say('Работа возвращена исполнителю с комментарием', 'undo'); } });
+}
+
+/* ---------- «Ждёт вас» для каждого участника ---------- */
+function todos(c, who) {
+  const { S, go } = c; const out = [];
+  S.transfers.filter(t => t.to === who && t.status === 'sent').forEach(t => out.push({ k: t.id, tone: 'orange', icon: 'hand',
+    text: P[t.from].short + ' передал ' + money(t.cur, t.amount) + (t.rate ? ' (по курсу ' + nf0.format(t.rate) + ')' : ''), sub: t.purpose + ' · подтвердите получение', btn: 'Получил', on: () => receive(c, t.id) }));
+  S.requests.filter(r => r.to === who && r.status === 'new').forEach(r => out.push({ k: r.id, tone: 'orange', icon: 'wallet',
+    text: P[r.from].short + ' просит ' + money(r.cur, r.amount) + ' · ' + r.kind.toLowerCase(), sub: r.parts || 'без разбивки', btn: 'Передал',
+    on: () => askTransfer(c, { from: who, to: r.from, amount: r.amount, cur: r.cur, purpose: r.kind === 'Аванс' ? 'Аванс по работам' : 'Под отчёт', extra: { req: r.id, contract: r.contract }, onDone: n => { n.requests.find(x => x.id === r.id).status = 'done'; } }) }));
+  S.works.filter(w => w.status === 'pending').forEach(w => {
+    const ct = CT[w.c];
+    if (ct.receiver === who) out.push({ k: w.id, tone: 'orange', icon: 'check', text: P[ct.to].short + ' сдал: ' + ct.title.toLowerCase() + (w.vol ? ' ' + w.vol + ' ' + ct.unit : ''), sub: w.photos + ' фото' + (w.video ? ' + видео' : '') + ' · ' + fd(w.date), btn: 'Проверить', on: () => (who === 'owner' ? go({ web: 'works' }) : go({ tg: 'accept' })) });
+    else if (who === 'owner') out.push({ k: w.id, tone: 'amber', icon: 'clock', text: P[ct.to].short + ' сдал ' + ct.title.toLowerCase() + ' ' + w.vol + ' ' + ct.unit, sub: 'Приёмщик — ' + P[ct.receiver].short + '. Вы видите приёмку и можете оспорить до оплаты', btn: 'Открыть', on: () => go({ web: 'works' }) });
+  });
+  S.works.filter(w => w.res && !w.payT && w.res.toPay > 0 && CT[w.c].from === who).forEach(w => {
+    const ct = CT[w.c];
+    out.push({ k: 'p' + w.id, tone: 'orange', icon: 'wallet', text: 'Оплатить ' + (P[ct.to].dat || P[ct.to].short) + ' ' + money(ct.cur, w.res.toPay), sub: 'За принятые ' + (w.res.accVol ? w.res.accVol + ' ' + ct.unit : 'работы') + ', аванс уже зачтён', btn: 'Передал',
+      on: () => askTransfer(c, { from: who, to: ct.to, amount: w.res.toPay, cur: ct.cur, purpose: 'Оплата принятых работ', extra: { work: w.id, contract: w.c }, onDone: n => { n.works.find(x => x.id === w.id).payT = true; } }) });
+  });
+  if (who === 'owner') {
+    const n = S.expenses.filter(e => e.status === 'sent');
+    if (n.length) out.push({ k: 'exp', tone: 'orange', icon: 'receipt', text: n.length + ' расход(а) на проверке · ' + usd(n.reduce((a, e) => a + e.usd, 0)), sub: 'Salom Penthouse · принять, вернуть или отклонить', btn: 'Проверить', on: () => go({ web: 'expenses' }) });
+    if (S.report.status === 'ready') out.push({ k: 'rep', tone: 'orange', icon: 'file', text: 'Отчёт по траншу 2 собран — отправить клиенту', sub: 'Собран сам из принятого ниже по цепочке', btn: 'Открыть', on: () => go({ web: 'report' }) });
+    if (S.tranches[2].status === 'sent') out.push({ k: 'tr3', tone: 'orange', icon: 'hand', text: 'Клиент передал транш 3 · ' + usd(S.tranches[2].amount), sub: 'Подтвердите получение', btn: 'Получил', on: () => go({ web: 'report' }) });
+    if (S.proposal.status === 'proposed') out.push({ k: 'kit', tone: 'amber', icon: 'clock', text: 'Кухня, Юнусабад 19-4: предложение ждёт клиента', sub: 'Отправлено по ссылке ' + KITCHEN.code, btn: 'Ссылка', on: () => go({ web: 'proposal' }) });
+    if (S.proposal.status === 'returned') out.push({ k: 'kit', tone: 'orange', icon: 'undo', text: 'Клиент вернул предложение по кухне', sub: '«' + S.proposal.comment + '»', btn: 'Открыть', on: () => go({ web: 'proposal' }) });
+  }
+  if (who === 'bakh') {
+    S.expenses.filter(e => e.who === 'bakh' && e.status === 'returned').forEach(e => out.push({ k: e.id, tone: 'orange', icon: 'undo', text: 'Возвращён расход: ' + e.name + ' · ' + money(e.cur, e.amount), sub: '«' + e.comment + '»', btn: 'Исправить',
+      on: () => c.ask({ title: 'Исправить расход', body: html`<div className="mt-3 flex gap-3 items-center"><${Receipt} e=${{ ...e, receipt: true }} /><div className="text-sm text-slate-600">Прикрепляем фото чека и отправляем снова. Сумма и раздел — без изменений.</div></div>`, ok: 'Отправить снова',
+        onOk: () => { c.act(n => { const x = n.expenses.find(y => y.id === e.id); x.receipt = true; x.status = 'sent'; x.comment = 'Исправлено: приложено фото'; }); c.say('Отправлено Джурабеку на проверку'); } }) }));
+    if (S.groupDraft) out.push({ k: 'grp', tone: 'violet', icon: 'spark', text: 'ИИ-агент из группы «Salom — объект»', sub: 'Голосовое: «цемент 20 мешков по 6 долларов строймаркет» → черновик', btn: 'Открыть', on: () => { c.act(n => { n.groupDraft = false; }); go({ tg: 'expense', draft: 'цемент 20 мешков по 6 долларов строймаркет' }); } });
+  }
+  if (who === 'sherzod' || who === 'nodir') {
+    S.works.filter(w => CT[w.c].to === who && w.res && !w.paid).forEach(w => out.push({ k: 'r' + w.id, tone: 'green', icon: 'check', text: 'Принято ' + (w.res.accVol || '') + ' ' + CT[w.c].unit + ' · к оплате ' + money(CT[w.c].cur, w.res.toPay), sub: w.payT ? 'Ждите «Передал» — уже отправлено' : 'Заказчик получил задачу «Оплатить»', btn: null }));
+    S.works.filter(w => CT[w.c].to === who && w.status === 'returned').forEach(w => out.push({ k: 'b' + w.id, tone: 'red', icon: 'undo', text: 'Работа возвращена: ' + w.vol + ' ' + CT[w.c].unit, sub: '«' + w.back + '»', btn: 'Сдать снова', on: () => go({ tg: 'work' }) }));
+    S.works.filter(w => CT[w.c].to === who && w.status === 'pending').forEach(w => out.push({ k: 'q' + w.id, tone: 'amber', icon: 'clock', text: 'На приёмке: ' + w.vol + ' ' + CT[w.c].unit + ' с ' + fd(w.date), sub: 'Приёмщик — ' + P[CT[w.c].receiver].short, btn: null }));
+  }
+  return out;
+}
+function TodoList({ items, compact }) {
+  const tone = { orange: 'border-l-orange-500', amber: 'border-l-amber-400', green: 'border-l-emerald-500', red: 'border-l-red-500', violet: 'border-l-violet-500' };
+  const ic = { orange: 'text-orange-600 bg-orange-50', amber: 'text-amber-700 bg-amber-50', green: 'text-emerald-700 bg-emerald-50', red: 'text-red-700 bg-red-50', violet: 'text-violet-700 bg-violet-50' };
+  if (!items.length) return html`<div className="text-sm text-slate-500 py-3 flex items-center gap-2"><${Icon} n="check" className="text-emerald-600" />Всё подтверждено — ничего не ждёт</div>`;
+  return html`<div className="space-y-2">${items.map(t => html`<div key=${t.k} className=${cx('flex items-center gap-3 bg-white rounded-xl border border-slate-200 border-l-4 px-3 py-2.5', tone[t.tone])}>
+    <div className=${cx('w-8 h-8 rounded-lg grid place-items-center shrink-0', ic[t.tone])}><${Icon} n=${t.icon} s=${16} /></div>
+    <div className="flex-1 min-w-0"><div className=${cx('font-medium text-slate-900 leading-snug', compact ? 'text-[13px]' : 'text-sm')}>${t.text}</div><div className="text-xs text-slate-500 truncate">${t.sub}</div></div>
+    ${t.btn && html`<${Btn} size="sm" tone=${t.btn === 'Открыть' || t.btn === 'Ссылка' ? 'ghost' : 'orange'} onClick=${t.on}>${t.btn}<//>`}</div>`)}</div>`;
+}
+
+/* ======================================================================
+   ВЕБ-КАБИНЕТ (управляющие проектом)
+   ====================================================================== */
+const WEB_NAV = [
+  ['projects', 'Мои проекты', 'home'], ['g', 'Salom Penthouse'], ['balance', 'Баланс', 'chart'], ['contracts', 'Договоры', 'users'],
+  ['smeta', 'Смета и этапы', 'layers'], ['expenses', 'Расходы', 'receipt'], ['works', 'Работы и приёмка', 'check'], ['report', 'Отчёт по траншу', 'file'],
+  ['g', 'Кухня, Юнусабад 19-4'], ['proposal', 'Предложение заказчику', 'link'],
+];
+const WEB_TZ = { projects: 'ТЗ с. 14, 17', balance: 'ТЗ с. 13–14', contracts: 'ТЗ с. 4–8, 14–16', smeta: 'ТЗ с. 4, 14, 17', expenses: 'ТЗ с. 11–12, 17', works: 'ТЗ с. 6–7, 12, 16', report: 'ТЗ с. 12, 16–17', proposal: 'ТЗ с. 14, 17–18' };
+
+function Web() {
+  const c = useC(); const { ui, go, S, say } = c;
+  const scr = { projects: Projects, balance: Balance, contracts: Contracts, smeta: Smeta, expenses: Expenses, works: WorksWeb, report: Report, proposal: Proposal }[ui.web];
+  const badge = { expenses: S.expenses.filter(e => e.status === 'sent').length, works: S.works.filter(w => w.status === 'pending').length };
+  const inProject = !['projects', 'proposal'].includes(ui.web);
+  return html`<div className="min-h-screen bg-slate-50">
+    <header className="no-print bg-white border-b border-slate-200">
+      <div className="max-w-7xl mx-auto px-4 h-14 flex items-center gap-3">
+        <div className="w-8 h-8 rounded-lg bg-orange-600 text-white font-bold grid place-items-center">О</div>
+        <div className="leading-tight"><div className="font-semibold text-slate-900 text-sm">Отчётность</div><div className="text-[11px] text-slate-500">веб-кабинет</div></div>
+        <div className="flex-1"></div>
+        <div className="flex text-xs rounded-lg ring-1 ring-slate-200 overflow-hidden">
+          <span className="px-2 py-1 bg-slate-900 text-white">RU</span>
+          <button onClick=${() => say('Узбекский (кириллица) — в релизе. Макет показан на русском.', 'alert')} className="px-2 py-1 text-slate-600 hover:bg-slate-50">ЎЗ</button></div>
+        <div className="flex items-center gap-2"><${Avatar} who="owner" />
+          <div className="hidden md:block text-xs leading-tight"><div className="font-medium text-slate-900">Джурабек Ганиев</div><div className="text-slate-500">Ganiev Development</div></div></div>
+      </div></header>
+    <div className="max-w-7xl mx-auto flex">
+      <aside className="no-print hidden lg:block w-60 shrink-0 p-4 sticky top-0 self-start">
+        <nav className="space-y-0.5">${WEB_NAV.map(([id, l, ic], i) => id === 'g'
+          ? html`<div key=${i} className="pt-4 pb-1 px-3 text-[11px] font-semibold uppercase tracking-wide text-slate-400">${l}</div>`
+          : html`<button key=${id} onClick=${() => go({ web: id })} className=${cx('w-full flex items-center gap-2.5 rounded-xl px-3 py-2 text-sm', ui.web === id ? 'bg-white shadow-sm ring-1 ring-slate-200 text-slate-900 font-semibold' : 'text-slate-600 hover:bg-white/70')}>
+              <${Icon} n=${ic} s=${16} className=${ui.web === id ? 'text-orange-600' : 'text-slate-400'} /><span className="flex-1 text-left">${l}</span>
+              ${badge[id] > 0 && html`<span className="rounded-full bg-orange-600 text-white text-[10px] font-bold px-1.5 min-w-[18px] text-center">${badge[id]}</span>`}</button>`)}</nav>
+        <div className="mt-6 rounded-xl bg-white ring-1 ring-slate-200 p-3 text-[11px] text-slate-500 leading-relaxed">Другие разделы проекта из ТЗ — Участники, Операции, «Кто кому должен» — показаны блоками на этих экранах.</div>
+      </aside>
+      <main className="flex-1 min-w-0 px-4 py-4 lg:py-6 lg:pr-6">
+        <div className="no-print lg:hidden -mx-4 px-4 mb-4 flex gap-2 overflow-x-auto no-scrollbar">${WEB_NAV.filter(n => n[0] !== 'g').map(([id, l]) => html`<button key=${id} onClick=${() => go({ web: id })}
+          className=${cx('shrink-0 rounded-full px-3 py-1.5 text-xs font-medium ring-1', ui.web === id ? 'bg-slate-900 text-white ring-slate-900' : 'bg-white text-slate-600 ring-slate-200')}>${l}${badge[id] > 0 ? ' · ' + badge[id] : ''}</button>`)}</div>
+        ${inProject && html`<${ProjectHead} />`}
+        <${scr} />
+        <p className="mt-8 text-[11px] text-slate-400">Макет без бэкенда · ${WEB_TZ[ui.web]} · имена условные, цифры — из примеров ТЗ 20.10.2026</p>
+      </main></div></div>`;
+}
+function ProjectHead() {
+  const { S, ui } = useC(); const m = salom(S);
+  const titles = { balance: 'Баланс', contracts: 'Договоры', smeta: 'Смета и этапы', expenses: 'Расходы', works: 'Работы и приёмка', report: 'Отчёт по траншу' };
+  return html`<div className="mb-5">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1"><span className="text-xs text-slate-500">Мои проекты /</span>
+      <h1 className="text-xl font-bold text-slate-900">Salom Penthouse · ${titles[ui.web]}</h1></div>
+    <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+      <${Chip} tone="slate">Генподрядчик · партнёр 50%<//><${Chip} tone="violet" icon="file">Под ключ $450 000 · в работе<//>
+      <span>Ташкент · ремонт пентхауса · USD · курс 12 500 · код SLM7K2</span></div>
+    ${ui.web !== 'balance' && html`<div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+      ${[['Договор с клиентом', usd(CONTRACT), 'violet'], ['Получено от клиента', usd(m.clientRec), 'green'], ['Освоено', Math.round(m.progress) + '%', null], ['На руках у исполнителей', usd(m.hands), 'amber']].map(([k, v, t]) => html`
+        <div key=${k} className="bg-white rounded-xl ring-1 ring-slate-200 px-3 py-2"><div className="text-[11px] text-slate-500">${k}</div><div className=${cx('num font-semibold', t === 'green' ? 'text-emerald-700' : t === 'amber' ? 'text-amber-700' : t === 'violet' ? 'text-violet-700' : 'text-slate-900')}>${v}</div></div>`)}</div>`}</div>`;
+}
+
+/* ---------- 1. Мои проекты ---------- */
+function Projects() {
+  const c = useC(); const { S, go, say } = c; const m = salom(S);
+  const kitchenOk = S.proposal.status === 'approved';
+  const cards = [
+    { id: 'salom', name: 'Salom Penthouse', addr: 'Ташкент · ремонт пентхауса', role: 'Генподрядчик · партнёр 50%', deal: 'Под ключ $450 000', dealSt: 'в работе', cur: 'USD', contract: CONTRACT, gotL: 'Получено от клиента', got: m.clientRec, prog: m.progress, hands: m.hands,
+      wait: todos(c, 'owner').filter(t => t.k !== 'kit').length, open: () => go({ web: 'balance' }) },
+    { id: 'ber', name: 'Beruniy 85 A/B', addr: 'Ташкент · два блока, ремонт', role: 'Генподрядчик', deal: 'Затраты + 15% · бюджет $212 000', dealSt: 'в работе', cur: 'USD', contract: 21200000, gotL: 'Получено от клиента', got: 9540000, prog: 38, hands: 1230000, wait: 2 },
+    { id: 'qori', name: 'Qori Niyoziy 55-33', addr: 'Ташкент · квартира', role: 'Заказчик', deal: 'Под ключ 185 000 000 сум', dealSt: 'в работе', cur: 'UZS', contract: 185000000, gotL: 'Передано исполнителю', got: 74000000, prog: 41, hands: 9850000, wait: 1 },
+    { id: 'kit', name: 'Кухня, Юнусабад 19-4', addr: 'Ташкент · кухня под ключ', role: 'Генподрядчик', deal: 'Под ключ $14 800', dealSt: { proposed: 'предложен', approved: 'согласован', returned: 'возвращён' }[S.proposal.status], cur: 'USD', contract: KITCHEN.total, gotL: 'Получено от клиента', got: 0, prog: 0, hands: 0, wait: 0, open: () => go({ web: 'proposal' }) },
+  ];
+  const inTotal = cards.filter(x => x.id !== 'kit' || kitchenOk);
+  const tot = cur => inTotal.filter(x => x.cur === cur).reduce((a, x) => ({ contract: a.contract + x.contract, got: a.got + x.got, hands: a.hands + x.hands }), { contract: 0, got: 0, hands: 0 });
+  const tu = tot('USD'), tz = tot('UZS');
+  const p = podFor(S, 'bakh');
+  const items = todos(c, 'owner');
+  return html`<div>
+    <h1 className="text-2xl font-bold text-slate-900">Мои проекты</h1>
+    <p className="text-sm text-slate-500 mt-1">Все цифры — сначала по каждому проекту, общий итог — отдельной строкой «всего». USD и сумы не смешиваются.</p>
+    <div className="mt-5 grid xl:grid-cols-[minmax(0,1fr)_400px] gap-4">
+      <div className="grid sm:grid-cols-2 gap-4 content-start">
+        ${cards.map(x => html`<button key=${x.id} onClick=${x.open || (() => say('В макете детально заполнены Salom Penthouse и Кухня. Остальные карточки — для вида списка.', 'alert'))}
+          className="text-left bg-white rounded-2xl ring-1 ring-slate-200 shadow-sm p-4 hover:ring-orange-300 hover:shadow transition">
+          <div className="flex items-start gap-2"><div className="flex-1 min-w-0"><div className="font-semibold text-slate-900">${x.name}</div><div className="text-xs text-slate-500">${x.addr}</div></div>
+            ${x.wait > 0 && html`<span className="rounded-full bg-orange-600 text-white text-[11px] font-bold px-2 py-0.5">ждёт вас: ${x.wait}</span>`}</div>
+          <div className="mt-2 flex flex-wrap gap-1.5"><${Chip}>${x.role}<//><${Chip} tone=${x.dealSt === 'в работе' || x.dealSt === 'согласован' ? 'violet' : x.dealSt === 'возвращён' ? 'orange' : 'amber'} icon="file">${x.deal} · ${x.dealSt}<//></div>
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <${Stat} label=${x.gotL} value=${money(x.cur, x.got)} tone="green" />
+            <${Stat} label="На руках у исполнителей" value=${money(x.cur, x.hands)} tone="amber" /></div>
+          <div className="mt-3"><div className="flex justify-between text-xs text-slate-500 mb-1"><span>Освоено бюджета</span><span className="num font-semibold text-slate-800">${Math.round(x.prog)}%</span></div><${Bar} v=${x.prog} /></div>
+        </button>`)}
+        <div className="sm:col-span-2 bg-slate-900 text-white rounded-2xl p-4">
+          <div className="flex items-baseline justify-between"><div className="font-semibold">Всего по ${inTotal.length} проектам</div><div className="text-xs text-slate-400">${kitchenOk ? 'включая кухню' : 'кухня не входит: договор ещё не согласован'}</div></div>
+          <div className="mt-3 overflow-x-auto"><table className="w-full text-sm num"><thead><tr className="text-[11px] text-slate-400 text-left"><th className="font-medium py-1">Валюта</th><th className="font-medium">Договоры</th><th className="font-medium">Получено / передано</th><th className="font-medium">На руках у исполнителей</th></tr></thead>
+            <tbody><tr className="border-t border-white/10"><td className="py-1.5">USD</td><td>${usd(tu.contract)}</td><td>${usd(tu.got)}</td><td>${usd(tu.hands)}</td></tr>
+              <tr className="border-t border-white/10"><td className="py-1.5">UZS</td><td>${uzs(tz.contract)}</td><td>${uzs(tz.got)}</td><td>${uzs(tz.hands)}</td></tr></tbody></table></div></div>
+      </div>
+      <div className="space-y-4">
+        <${Card} title="Ждёт вас" sub="Всё, что требует вашего «Принять», «Передал» или «Получил»"><${TodoList} items=${items} /><//>
+        <${Card} title="Кто кому должен" sub="По всем проектам, с разбивкой">
+          <div className="divide-y divide-slate-100 text-sm">
+            ${[['Бахтиёр → вам', 'под отчётом, Salom', usd(p.under), 'amber'], ['Бахтиёр → вам', 'под отчётом, Beruniy', usd(161000), 'amber'],
+              ['Вы → Бахтиёр', 'вознаграждение 10% к оплате', usd(p.toPay), 'orange'],
+              ...S.works.filter(w => w.res && !w.paid && CT[w.c].from === 'owner').map(w => ['Вы → ' + P[CT[w.c].to].short, 'за принятые работы', money(CT[w.c].cur, w.res.toPay), 'orange']),
+              ['Клиент → вам', 'транш 3 после приёмки этапа 2', usd(S.tranches[2].amount), 'violet'], ['Бригада Отабека → вам', 'под отчётом, Qori Niyoziy', uzs(9850000), 'amber']]
+              .map(([a, b, v, t], i) => html`<div key=${i} className="flex items-center gap-2 py-2"><div className="flex-1 min-w-0"><div className="font-medium text-slate-800">${a}</div><div className="text-xs text-slate-500">${b}</div></div>
+                <span className=${cx('num font-semibold', t === 'amber' ? 'text-amber-700' : t === 'orange' ? 'text-orange-700' : 'text-violet-700')}>${v}</span></div>`)}</div><//>
+      </div></div></div>`;
+}
+
+/* ---------- 2. Баланс ---------- */
+function Balance() {
+  const c = useC(); const { S, go } = c; const m = salom(S);
+  const exp = S.tranches.filter(t => !t.got || t.status === 'sent').reduce((a, t) => a + t.amount, 0);
+  const flow = [['Получено от клиента', m.clientRec, 'green', '+'], ['Передано прорабам и закупщику', m.transferred, 'amber', '−'], ['Оплачено напрямую владельцем', m.direct, 'slate', '−'], ['Выплачено исполнителям по договорам', m.paidSubs, 'slate', '−'], ['Снято партнёрами', m.withdrawn, 'violet', '−']];
+  const withdraw = who => {
+    const can = Math.max(0, m.share - S.partners[who]);
+    c.ask({ title: 'Снять долю: ' + P[who].name, note: 'Можно снять сейчас ' + usd(can) + '. Доля открывается пропорционально освоенному бюджету.', fields: [{ key: 'a', label: 'Сумма, $', type: 'number', value: can / 100, required: true }],
+      validate: v => (+v.a > 0 && Math.round(+v.a * 100) <= can ? '' : 'Не больше ' + usd(can)), ok: 'Снять',
+      onOk: v => { c.act(n => { n.partners[who] += Math.round(+v.a * 100); }); c.say('Снятие доли зафиксировано в журнале: ' + usd(Math.round(+v.a * 100))); } });
+  };
+  return html`<div className="space-y-4">
+    <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-3">
+      <${Card}><${Stat} big label="Договор с клиентом" value=${usd(CONTRACT)} hint="Под ключ · СМР по смете" tone="violet" /><//>
+      <${Card}><${Stat} big label="Получено от клиента" value=${usd(m.clientRec)} hint=${'ожидается ещё ' + usd(exp)} tone="green" /><//>
+      <${Card}><${Stat} big label="Освоено" value=${m.progress.toFixed(0) + '%'} hint=${usd(m.fact) + ' из ' + usd(PLAN)} /><div className="mt-2"><${Bar} v=${m.progress} /></div><//>
+      <${Card}><${Stat} big label="Прибыль" value=${usd(m.earned)} hint=${'заработано по освоенному · план ' + usd(MARGIN)} tone="green" /><//>
+    </div>
+    <div className="grid xl:grid-cols-2 gap-4">
+      <${Card} title="Клиент и транши" sub="Получено = Σ поступлений от клиента. Транш засчитан только после «Получил».">
+        <div className="space-y-2">${S.tranches.map(t => html`<div key=${t.n} className="flex items-center gap-3 rounded-xl ring-1 ring-slate-200 px-3 py-2">
+          <div className="w-7 h-7 rounded-lg bg-violet-50 text-violet-700 grid place-items-center text-xs font-bold">${t.n}</div>
+          <div className="flex-1 min-w-0"><div className="text-sm font-medium text-slate-900">${t.name} · ${t.pct}%</div><div className="text-xs text-slate-500 truncate">${t.stage} · срок ${fdy(t.due)}</div></div>
+          <div className="text-right"><div className="num text-sm font-semibold">${usd(t.amount)}</div>
+            ${t.status === 'closed' ? html`<${Chip} tone="green">получен ${fd(t.got)} · отчёт принят<//>` : t.status === 'reporting' ? html`<${Chip} tone="amber">получен ${fd(t.got)} · идёт отчёт<//>` : t.status === 'requested' ? html`<${Chip} tone="amber">запрошен<//>` : t.status === 'sent' ? html`<${Chip} tone="orange">передан · ждёт «Получил»<//>` : t.status === 'received' ? html`<${Chip} tone="green">получен ${fd(t.got)}<//>` : html`<${Chip}>по графику<//>`}</div></div>`)}</div>
+        <div className="mt-3 flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm"><span className="text-slate-600">Дизайн-проект — отдельный договор, своё распределение</span><span className="num font-semibold">$11 500 · завершён</span></div>
+        <div className="mt-3"><${Btn} tone="ghost" size="sm" icon="file" onClick=${() => go({ web: 'report' })}>Отчёт по траншу 2<//></div><//>
+      <${Card} title="Куда ушли деньги" sub="Из передач и подотчётов. Неподтверждённое висит на том, кто его внёс.">
+        <div className="space-y-2.5">${flow.map(([k, v, t, s]) => html`<div key=${k}><div className="flex justify-between text-sm"><span className="text-slate-600">${s} ${k}</span><span className="num font-semibold">${usd(v)}</span></div>
+          <div className="mt-1"><${Bar} v=${pct(v, m.clientRec)} tone=${t} h="h-1.5" /></div></div>`)}
+          <div className="border-t border-slate-200 pt-2 flex justify-between text-sm"><span className="font-semibold">= Остаток у владельца</span><span className="num font-bold text-slate-900">${usd(m.cash)}</span></div></div>
+        <div className="mt-4 grid grid-cols-2 gap-3 rounded-xl bg-amber-50 ring-1 ring-amber-200 p-3">
+          <${Stat} label="На руках у прорабов" value=${usd(m.hands)} hint="передано − принято по подотчёту" tone="amber" />
+          <${Stat} label="Расходы на проверке" value=${usd(m.reviewSum)} hint=${m.reviewN + ' ждут решения'} tone="amber" /></div>
+        ${m.inTransit > 0 && html`<div className="mt-3"><${Note} tone="amber" icon="clock">В пути ${usd(m.inTransit)}: вы нажали «Передал», получатель ещё не нажал «Получил». В остатки не входит.<//></div>`}<//>
+    </div>
+    <${Card} title="Себестоимость: план и факт" sub="План = контракт × 75%. Факт = принятые расходы + прямые оплаты + начисления за принятые работы.">
+      <div className="grid md:grid-cols-3 gap-4">
+        <div className="space-y-1"><${Row} k="План себестоимости" v=${usd(PLAN)} strong /><${Row} k="Принятые расходы по подотчёту" v=${usd(m.pod)} /><${Row} k="Прямые оплаты владельца" v=${usd(m.direct)} /><${Row} k="Начисления за принятые работы" v=${usd(m.works)} />
+          <div className="border-t border-slate-200"><${Row} k="Факт" v=${usd(m.fact)} strong tone="green" /></div></div>
+        <div className="md:col-span-2 space-y-3">${m.stages.map(s => { const late = s.id === 2 && S.stageClient[2] !== 'accepted' && daysLate(s.due) > 0;
+          return html`<div key=${s.id}><div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium text-slate-800">Этап ${s.id}. ${s.name}</span>
+            <span className="num text-slate-600">${usd(s.factLive)} из ${usd(s.plan)} · <b className="text-slate-900">${pct(s.factLive, s.plan)}%</b></span></div>
+            <div className="mt-1 flex items-center gap-2"><div className="flex-1"><${Bar} v=${pct(s.factLive, s.plan)} tone=${late ? 'red' : S.stageClient[s.id] === 'accepted' ? 'green' : 'amber'} /></div>
+            ${late ? html`<${Chip} tone="red" icon="alert">просрочка ${daysLate(s.due)} дн<//>` : S.stageClient[s.id] === 'accepted' ? html`<${Chip} tone="green">принят клиентом<//>` : html`<${Chip}>до ${fd(s.due)}<//>`}</div></div>`; })}</div></div><//>
+    <${Card} title="Доли партнёров" sub="Можно снять = факт себестоимости × (маржа ÷ себестоимость) × доля − уже снято">
+      <div className="overflow-x-auto"><table className="w-full text-sm num min-w-[560px]"><thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500"><th className="font-medium py-2">Партнёр</th><th className="font-medium">Доля</th><th className="font-medium">Открыто по освоенному</th><th className="font-medium">Снято</th><th className="font-medium">Можно снять сейчас</th><th className="font-medium">Впереди</th><th></th></tr></thead>
+        <tbody>${['owner', 'partner'].map(w => html`<tr key=${w} className="border-t border-slate-100"><td className="py-2.5"><div className="flex items-center gap-2"><${Avatar} who=${w} s="w-7 h-7" />${P[w].name}</div></td><td>50%</td><td>${usd(m.share)}</td><td>${usd(S.partners[w])}</td>
+          <td className="font-semibold text-emerald-700">${usd(Math.max(0, m.share - S.partners[w]))}</td><td className="text-slate-500">${usd(MARGIN / 2 - m.share)}</td>
+          <td className="text-right"><${Btn} size="sm" tone="ghost" disabled=${m.share - S.partners[w] <= 0} onClick=${() => withdraw(w)}>Снять<//></td></tr>`)}</tbody></table></div>
+      <div className="mt-3"><${Note} tone="violet" icon="chart">${usd(m.fact)} × (${usd(MARGIN)} ÷ ${usd(PLAN)}) × 50% = <b>${usd(m.share)}</b> на партнёра — то же, что строка «Имеем право» в Excel: 1/6 от израсходованного. Модель Salom Penthouse: СМР $450 000, себестоимость 75% = $337 500, маржа $112 500, 50/50.<//></div><//>
+  </div>`;
+}
+
+/* ---------- 3. Договоры ---------- */
+function visFor(S, viewer, cid) {
+  if (viewer === 'owner') return 'full';
+  const own = { bakh: ['bakh', 'sherzod'], nodir: ['nodir'] }[viewer];
+  if (own.includes(cid)) return 'full';
+  if (cid === 'client' && viewer === 'bakh' && S.rights.bakh[1]) return 'full';
+  if (cid === 'client') return 'locked';
+  return 'hidden';
+}
+function Contracts() {
+  const c = useC(); const { S, ui, go } = c; const viewer = ui.viewAs;
+  const sel = visFor(S, viewer, ui.selContract) === 'full' ? ui.selContract : CT_ORDER.find(id => visFor(S, viewer, id) === 'full');
+  const node = (id, depth) => {
+    const ct = CT[id]; const v = visFor(S, viewer, id);
+    if (v === 'hidden') return null;
+    const kids = CT_ORDER.filter(k => CT[k].parent === id);
+    const st = id === 'design' ? 'завершён' : 'в работе';
+    return html`<div key=${id} className=${depth ? 'relative pl-4' : ''}>
+      ${depth > 0 && html`<span className="absolute left-0 top-[30px] w-4 border-t-2 border-slate-200"></span>`}
+      <button disabled=${v !== 'full'} onClick=${() => go({ selContract: id })}
+        className=${cx('w-full text-left flex items-center gap-3 rounded-xl px-3 py-2.5 mt-2 ring-1 transition', sel === id ? 'ring-violet-400 bg-violet-50/60' : 'ring-slate-200 bg-white hover:ring-violet-300', v !== 'full' && 'opacity-80 cursor-default')}>
+        <${Avatar} who=${ct.to} />
+        <div className="flex-1 min-w-0"><div className="text-sm font-semibold text-slate-900 truncate">${ct.to === 'owner' ? 'Ganiev Development' : P[ct.to].name}</div>
+          <div className="text-xs text-slate-500 truncate">${P[ct.to].label} · заказчик: ${ct.from === 'owner' ? 'Ganiev Development' : P[ct.from].name}</div></div>
+        ${v === 'full' ? html`<div className="text-right shrink-0"><${Chip} tone="violet" icon="file">${ct.title}<//><div className="num text-xs font-semibold text-slate-800 mt-1">${ct.short}</div></div>`
+          : html`<${Chip} icon="lock">условия скрыты<//>`}
+        ${v === 'full' && html`<${Chip} className="hidden sm:inline-flex" tone=${st === 'завершён' ? 'green' : 'violet'}>${st}<//>`}
+      </button>
+      ${kids.length > 0 && html`<div className="ml-4 border-l-2 border-slate-200">${kids.map(k => node(k, 1))}</div>`}</div>`;
+  };
+  return html`<div className="grid xl:grid-cols-5 gap-4">
+    <div className="xl:col-span-2 space-y-4">
+      <${Card} title="Цепочка договоров" sub="Клиент → генподрядчик → прораб → бригада. Нажмите на договор."
+        right=${html`<span className="text-[11px] text-slate-400 hidden sm:block">дерево «кто кого привлёк»</span>`}>
+        <div className="mb-3"><div className="text-xs text-slate-500 mb-1.5 flex items-center gap-1"><${Icon} n="eye" s=${13} />Смотреть глазами участника (проверка видимости):</div>
+          <${Seg} small value=${viewer} onChange=${v => go({ viewAs: v })} options=${[['owner', 'Генподрядчик'], ['bakh', 'Прораб'], ['nodir', 'Мастер']]} /></div>
+        <div className="flex items-center gap-3 rounded-xl bg-violet-50 px-3 py-2.5 ring-1 ring-violet-200">
+          <${Avatar} who="client" /><div className="flex-1 min-w-0"><div className="text-sm font-semibold text-slate-900">${viewer === 'owner' ? 'Тимур Алиев' : 'Клиент'}</div><div className="text-xs text-slate-500">Конечный заказчик · вход по ссылке и телефону</div></div></div>
+        <div className="ml-4 border-l-2 border-slate-200"><div className="relative pl-4"><span className="absolute left-0 top-[30px] w-4 border-t-2 border-slate-200"></span>${node('client', 0)}</div>
+          ${viewer === 'owner' && html`<div className="relative pl-4"><span className="absolute left-0 top-[30px] w-4 border-t-2 border-slate-200"></span>${node('design', 0)}</div>`}</div>
+        ${viewer !== 'owner' && html`<div className="mt-3"><${Note} tone="violet" icon="lock">${viewer === 'nodir' ? 'Мастер видит только свой договор. Договор генподрядчика с клиентом и договоры других исполнителей скрыты.' : 'Прораб видит свой договор и договоры своих людей. Договор с клиентом — только при галочке «Видеть условия договора уровнем выше».'}<//></div>`}<//>
+      <${Card} title="Правило видимости цены" sub="Нижний уровень не видит цену и наценку верхнего">
+        <div className="rounded-xl ring-1 ring-slate-200 p-3"><div className="text-sm font-medium text-slate-900">Укладка плитки, 1 800 м²</div>
+          ${viewer === 'owner' ? html`<div className="mt-2 grid grid-cols-3 gap-2 text-center num">
+              <div className="rounded-lg bg-violet-50 p-2"><div className="text-[11px] text-violet-700">Клиент платит</div><div className="font-bold text-violet-900">$10/м²</div></div>
+              <div className="rounded-lg bg-slate-50 p-2"><div className="text-[11px] text-slate-500">Мастеру</div><div className="font-bold">$8/м²</div></div>
+              <div className="rounded-lg bg-emerald-50 p-2"><div className="text-[11px] text-emerald-700">Ваша маржа</div><div className="font-bold text-emerald-800">$2/м²</div></div></div>`
+          : viewer === 'nodir' ? html`<div className="mt-2 grid grid-cols-2 gap-2 text-center num">
+              <div className="rounded-lg bg-violet-50 p-2"><div className="text-[11px] text-violet-700">Ваша ставка</div><div className="font-bold text-violet-900">$8/м²</div></div>
+              <div className="rounded-lg bg-slate-50 p-2 text-slate-400"><div className="text-[11px] flex justify-center items-center gap-1"><${Icon} n="lock" s=${11} />Цена уровнем выше</div><div className="font-bold">скрыта</div></div></div>`
+          : html`<div className="mt-2 text-sm text-slate-500 flex items-center gap-1.5"><${Icon} n="lock" s=${14} />Договор мастера — не ваш уровень: не виден</div>`}</div><//>
+    </div>
+    <div className="xl:col-span-3">${sel && html`<${ContractCard} id=${sel} viewer=${viewer} />`}</div></div>`;
+}
+function ContractCard({ id, viewer }) {
+  const c = useC(); const { S, act, say, go } = c; const ct = CT[id]; const cs = S.cs[id];
+  const stIdx = id === 'design' ? 4 : 3;
+  const p = podFor(S, 'bakh');
+  const rows = {
+    client: [['Состав работ', 'Ремонт пентхауса под ключ по смете ред. 3: 10 разделов, 4 этапа'], ['Модель оплаты', 'Под ключ (фикс): сумма + транши по этапам; исполнитель сдаёт объём, а не траты'], ['Сумма и валюта', '$450 000 · USD'],
+      ...(viewer === 'owner' ? [['Наценка (видите только вы)', 'себестоимость 75% = $337 500 · маржа $112 500']] : []), ['Сроки', '01.08.2026 – 25.12.2026, у каждого этапа свой срок'],
+      ['Режим отчётности', 'Работы: этапы, объёмы, фото и видео. Строки расходов клиент не видит'], ['Приёмщик', 'Клиент, Тимур Алиев'], ['Гарантия', '12 месяцев на работы'], ['Условия текстом', 'Материалы закупает генподрядчик. Изменения сметы и сроков — новой редакцией с согласием клиента.']],
+    design: [['Состав работ', 'Дизайн-проект пентхауса: планировки, визуализации, рабочие чертежи'], ['Сумма', '$11 500 — ведётся отдельной строкой со своим распределением'], ['Почему отдельно', 'Открытый вопрос 6 ТЗ: отдельный договор в том же проекте']],
+    bakh: [['Состав', 'Ведение объекта: закупка, бригады, расходы с чеками'], ['Модель оплаты', '% от расходов: 10% × принятые расходы за период. Прямые оплаты владельца не входят'], ['Подотчёт', 'Деньги под отчёт: ' + usd(p.received) + ' получено · ' + usd(p.under) + ' под отчётом'],
+      ['Начислено вознаграждения', usd(p.accrued) + ' · выплачено $0 · к оплате ' + usd(p.toPay)], ['Режим отчётности', 'Расходы с чеками, проверка построчно (по умолчанию)'], ['Приёмщик', 'Ganiev Development']],
+    sherzod: [['Состав работ', 'Кладка перегородок из газоблока, 300 м²'], ['Модель оплаты', 'Фикс за объём: 300 м² × 60 000 сум = 18 000 000 сум'], ['Аванс', uzs(cs?.advance || 0) + ' выдан · зачтено ' + uzs(cs?.advClosed || 0)],
+      ['Принято', (cs?.accVol || 0) + ' из 300 м² · начислено ' + uzs(cs?.accrued || 0)], ['Кто покупает материал', 'Прораб (из подотчёта)'], ['Приёмщик', 'Прораб Бахтиёр'], ['Срок', '15.11.2026']],
+    nodir: [['Состав работ', 'Укладка плитки: санузлы, кухня, терраса — 1 800 м²'], ['Модель оплаты', 'Фикс за объём: 1 800 м² × $8 = $14 400'], ['Аванс', usd(cs?.advance || 0) + ' выдан · зачтено ' + usd(cs?.advClosed || 0)],
+      ['Принято', (cs?.accVol || 0) + ' из 1 800 м² · начислено ' + usd(cs?.accrued || 0)], ['Удержание при замечаниях', '20% до исправления'], ['Приёмщик', 'Ganiev Development'], ['Срок', '30.11.2026']],
+    ilhom: [['Состав работ', 'Щит и слаботочка ($1 200) → освещение и розетки ($1 800)'], ['Модель оплаты', 'Под ключ: $3 000, оплата по этапам после приёмки'], ['Принято', 'Этап «Щит и слаботочка» — 27.10 · оплачено $1 200'], ['Срок', '10.11.2026']],
+    partner: [['Модель', 'Доля прибыли: себестоимость 75%, маржа делится 50/50'], ['Правило', 'Доля открывается пропорционально освоенному бюджету'], ['Снято', usd(S.partners.partner)]],
+  }[id];
+  const tranches = id === 'client';
+  return html`<div className="bg-white rounded-2xl ring-1 ring-violet-200 shadow-sm overflow-hidden">
+    <div className="bg-gradient-to-r from-violet-600 to-violet-500 text-white px-5 py-4">
+      <div className="flex items-start gap-3"><${Icon} n="file" s=${22} className="mt-0.5 opacity-80" />
+        <div className="flex-1 min-w-0"><div className="text-xs text-violet-100">Договор · ${ct.model}</div><div className="text-lg font-bold">${ct.title}</div>
+          <div className="text-xs text-violet-100 mt-0.5">${ct.from === 'owner' ? 'Ganiev Development' : P[ct.from].name} (заказчик) → ${ct.to === 'owner' ? 'Ganiev Development' : P[ct.to].name} (исполнитель)</div></div>
+        <div className="text-right num"><div className="text-xl font-bold">${ct.short}</div></div></div>
+      <div className="mt-4 flex items-center gap-1">${C_STEPS.map((s, i) => html`<div key=${s} className="flex-1"><div className=${cx('h-1.5 rounded-full', i <= stIdx ? 'bg-white' : 'bg-white/30')}></div><div className=${cx('mt-1 text-[10px] sm:text-[11px]', i === stIdx ? 'font-semibold' : 'text-violet-200')}>${s}</div></div>`)}</div></div>
+    <div className="p-5 space-y-5">
+      <dl className="divide-y divide-slate-100">${rows.map(([k, v]) => html`<div key=${k} className="grid sm:grid-cols-3 gap-1 sm:gap-3 py-2 text-sm"><dt className="text-slate-500">${k}</dt><dd className="sm:col-span-2 text-slate-900">${v}</dd></div>`)}</dl>
+      ${['client', 'sherzod', 'nodir'].includes(id) && html`<label className="flex items-start gap-3 rounded-xl ring-1 ring-slate-200 p-3 cursor-pointer">
+        <input type="checkbox" className="mt-1 accent-orange-600" checked=${!!S.strict[id]} onChange=${() => act(n => { n.strict[id] = !n.strict[id]; })} />
+        <div className="text-sm"><div className="font-medium text-slate-900">Строгий срок со штрафом</div>
+          <div className="text-xs text-slate-500">${S.strict[id] ? '0,1% от суммы этапа в день, предел 5%. Система только считает штраф и предлагает удержание — применяет заказчик, видно обеим сторонам.' : 'Выключено: срок — ориентир, просрочка только подсвечивается.'}</div></div></label>`}
+      ${tranches && html`<div><div className="text-sm font-semibold text-slate-900 mb-2">График траншей</div>
+        <div className="overflow-x-auto"><table className="w-full text-sm num min-w-[480px]"><thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500"><th className="font-medium py-1.5">#</th><th className="font-medium">Этап → состав</th><th className="font-medium">Сумма</th><th className="font-medium">Срок</th><th className="font-medium">Статус</th></tr></thead>
+          <tbody>${S.tranches.map(t => html`<tr key=${t.n} className="border-t border-slate-100"><td className="py-2">${t.n}</td><td>${t.name} <span className="text-slate-500">· ${t.stage}</span></td><td className="font-semibold">${usd(t.amount)} <span className="text-slate-400 font-normal">${t.pct}%</span></td><td>${fd(t.due)}</td>
+            <td>${t.status === 'closed' ? html`<${Chip} tone="green">закрыт отчётом<//>` : t.status === 'reporting' ? html`<${Chip} tone="amber">получен · отчёт<//>` : t.status === 'plan' ? html`<${Chip}>план<//>` : html`<${Chip} tone="amber">${t.status === 'requested' ? 'запрошен' : t.status === 'sent' ? 'передан' : 'получен'}<//>`}</td></tr>`)}</tbody></table></div></div>`}
+      ${S.rights[id] && viewer === 'owner' && html`<div><div className="text-sm font-semibold text-slate-900 mb-1">Права исполнителя</div><p className="text-xs text-slate-500 mb-2">Галочки на участнике, по умолчанию закрыто. Проверяются на сервере; выгрузка в Excel и PDF показывает ровно то же, что экран.</p>
+        <div className="grid sm:grid-cols-2 gap-1.5">${RIGHTS.map((r, i) => html`<label key=${i} className="flex items-start gap-2 text-sm rounded-lg px-2 py-1.5 hover:bg-slate-50 cursor-pointer">
+          <input type="checkbox" className="mt-0.5 accent-orange-600" checked=${S.rights[id][i]} onChange=${() => { act(n => { n.rights[id][i] = !n.rights[id][i]; }); if (id === 'bakh' && i === 1) say(S.rights.bakh[1] ? 'Прораб больше не видит договор с клиентом' : 'Прораб теперь видит договор с клиентом — проверьте «Смотреть глазами: Прораб»', 'eye'); }} />
+          <span className="text-slate-700">${r}</span></label>`)}</div></div>`}
+      ${id === 'client' && html`<div><div className="text-sm font-semibold text-slate-900 mb-2">Редакции</div>
+        <ol className="space-y-1.5">${S.redactions.map(r => html`<li key=${r.n} className="flex items-start gap-2 text-sm"><span className="num text-xs font-semibold text-violet-700 bg-violet-50 rounded px-1.5 py-0.5">ред. ${r.n}</span><span className="flex-1 text-slate-700">${r.text}</span><span className="text-xs text-slate-400 num">${fd(r.date)}</span>
+          ${r.st === 'черновик' && html`<${Chip} tone="amber">ждёт клиента<//>`}</li>`)}</ol></div>`}
+      <div className="flex flex-wrap gap-2 pt-1">
+        ${id === 'client' && html`<${Btn} tone="violet" icon="file" onClick=${() => c.ask({ title: 'Новая редакция договора', note: 'Новая редакция сметы, этапа или срока уходит второй стороне как предложение. Принятые операции редакция не трогает.', fields: [{ key: 't', label: 'Что меняется', type: 'textarea', required: true, value: 'Терраса: + освещение, 12 точек, +$1 200' }], ok: 'Предложить клиенту',
+          onOk: v => { act(n => { n.redactions.push({ n: n.redactions.length + 1, date: TODAY, text: v.t, st: 'черновик' }); }); say('Редакция отправлена клиенту на согласование'); } })}>Предложить редакцию<//>`}
+        ${id === 'client' && html`<${Btn} tone="ghost" icon="layers" onClick=${() => go({ web: 'smeta' })}>Смета и этапы<//>`}
+        ${['sherzod', 'nodir', 'ilhom'].includes(id) && html`<${Btn} tone="ghost" icon="check" onClick=${() => go({ web: 'works' })}>Работы по договору<//>`}
+        ${id === 'bakh' && html`<${Btn} tone="ghost" icon="receipt" onClick=${() => go({ web: 'expenses' })}>Расходы прораба<//>`}
+      </div></div></div>`;
+}
+
+/* ---------- 4. Смета и этапы ---------- */
+function Smeta() {
+  const c = useC(); const { S, ui, go, say } = c; const m = salom(S);
+  const internal = ui.smetaMode === 'internal';
+  const [open, setOpen] = useState({ tile: true, wall: true });
+  return html`<div className="space-y-4">
+    <div className="flex flex-wrap items-center gap-2">
+      <${Seg} value=${ui.smetaMode} onChange=${v => go({ smetaMode: v })} options=${[['internal', 'Внутренняя'], ['client', 'Для заказчика']]} />
+      <div className="flex-1"></div>
+      <${Btn} tone="ghost" size="sm" icon="download" onClick=${() => say('Импорт сметы из Excel — в релизе. В макете смета уже загружена.', 'alert')}>Импорт из Excel<//>
+      <${Btn} tone="violet" size="sm" icon="link" onClick=${() => go({ web: 'proposal' })}>Предложение заказчику<//></div>
+    ${!internal && html`<${Note} tone="violet" icon="eye">Так смету видит клиент: цены для заказчика, без себестоимости и наценки исполнителя.<//>`}
+    <${Card} pad=${false} title=${internal ? 'Смета ред. 3 · внутренняя' : 'Смета ред. 3 · для заказчика'} sub="Разделы → статьи: объём × единица × цена"
+      right=${html`<div className="text-right num"><div className="text-lg font-bold text-slate-900">${usd(CONTRACT)}</div>${internal && html`<div className="text-xs text-slate-500">себестоимость ${usd(PLAN)}</div>`}</div>`}>
+      <div className="mt-3 border-t border-slate-100">${SEC.map(s => { const sp = secSum(s, 'p'), sc = secSum(s, 'c');
+        return html`<div key=${s.id} className="border-b border-slate-100">
+          <button onClick=${() => setOpen(o => ({ ...o, [s.id]: !o[s.id] }))} className="w-full flex items-center gap-3 px-4 sm:px-5 py-3 hover:bg-slate-50 text-left">
+            <${Icon} n=${open[s.id] ? 'down' : 'right'} s=${16} className="text-slate-400" />
+            <span className="flex-1 font-medium text-slate-900 text-sm">${s.name} <span className="text-xs text-slate-400 font-normal">· этап ${s.stage} · ${s.lines.length} ст.</span></span>
+            ${internal && html`<span className="hidden sm:inline num text-xs text-slate-500">себест. ${usd(sc)} · наценка ${Math.round(((sp - sc) * 100) / sc)}%</span>`}
+            <span className="num font-semibold text-sm w-24 text-right">${usd(sp)}</span></button>
+          ${open[s.id] && html`<div className="px-4 sm:px-5 pb-3 overflow-x-auto"><table className="w-full text-sm num min-w-[560px]">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-400"><th className="font-medium py-1">Статья</th><th className="font-medium">Тип</th><th className="font-medium text-right">Объём</th><th className="font-medium text-right">Цена</th><th className="font-medium text-right">Сумма</th>
+              ${internal && html`<th className="font-medium text-right">Себест./ед</th>`}${internal && html`<th className="font-medium text-right">Наценка</th>`}</tr></thead>
+            <tbody>${s.lines.map(l => html`<tr key=${l.n} className="border-t border-slate-50"><td className="py-1.5 text-slate-800">${l.n}${internal && l.vis && html` <${Chip} tone="violet" icon="lock">мастер видит только $8<//>`}</td><td className="text-slate-500">${l.t}</td>
+              <td className="text-right">${nf0.format(l.q)} ${l.u}</td><td className="text-right">${usd(Math.round(l.p * 100))}</td><td className="text-right font-medium">${usd(Math.round(l.q * l.p * 100))}</td>
+              ${internal && html`<td className="text-right text-slate-500">${usd(Math.round(l.c * 100))}</td>`}${internal && html`<td className="text-right text-emerald-700">${Math.round(((l.p - l.c) * 100) / l.c)}%</td>`}</tr>`)}</tbody></table></div>`}</div>`; })}</div><//>
+    <${Card} title="Этапы и прогресс" sub="Прогресс — по деньгам: (принятые расходы + принятые работы) ÷ бюджет этапа по себестоимости">
+      <div className="space-y-4">${m.stages.map(s => { const late = s.id === 2 && S.stageClient[2] !== 'accepted' && daysLate(s.due) > 0; const v = pct(s.factLive, s.plan);
+        return html`<div key=${s.id} className="grid md:grid-cols-5 gap-2 items-center">
+          <div className="md:col-span-2"><div className="text-sm font-medium text-slate-900">Этап ${s.id}. ${s.name}</div><div className="text-xs text-slate-500 num">${internal ? 'бюджет ' + usd(s.plan) + ' · клиенту ' + usd(s.client) : 'сумма ' + usd(s.client)} · срок ${fdy(s.due)}</div></div>
+          <div className="md:col-span-2"><${Bar} v=${v} tone=${late ? 'red' : S.stageClient[s.id] === 'accepted' ? 'green' : 'amber'} h="h-2.5" /></div>
+          <div className="flex md:justify-end items-center gap-2"><span className="num font-semibold text-sm">${v}%</span>
+            ${late ? html`<${Chip} tone="red" icon="alert">просрочка ${daysLate(s.due)} дн<//>` : S.stageClient[s.id] === 'accepted' ? html`<${Chip} tone="green">принят<//>` : html`<${Chip} tone="amber">в работе<//>`}</div></div>`; })}</div>
+      <div className="mt-4 flex flex-wrap gap-2"><${Btn} tone="violet" size="sm" icon="file" onClick=${() => go({ web: 'contracts', selContract: 'client' })}>График траншей в договоре<//>
+        <${Btn} tone="ghost" size="sm" icon="refresh" onClick=${() => c.ask({ title: 'Новая редакция сметы', note: 'Уйдёт клиенту как предложение. После согласия меняются бюджет и график, старая редакция хранится.', fields: [{ key: 't', label: 'Изменение', type: 'textarea', required: true, value: 'Этап 2: срок 15.10 → 10.11 (задержка поставки газоблока)' }], ok: 'Отправить на согласование',
+          onOk: v => { c.act(n => { n.redactions.push({ n: n.redactions.length + 1, date: TODAY, text: v.t, st: 'черновик' }); }); say('Редакция ' + (S.redactions.length + 1) + ' отправлена клиенту'); } })}>Новая редакция<//></div><//>
+  </div>`;
+}
+
+/* ---------- 5. Расходы ---------- */
+function Expenses() {
+  const c = useC(); const { S, act, say, ui, go } = c;
+  const [sel, setSel] = useState([]);
+  const f = ui.expFilter, fw = ui.expWho;
+  const all = S.expenses.filter(e => e.status !== 'draft'); // черновик видит только автор
+  const list = all.filter(e => (f === 'all' || (f === 'review' ? ['sent', 'partial'].includes(e.status) : e.status === f)) && (fw === 'all' || e.who === fw));
+  const sent = all.filter(e => e.status === 'sent');
+  const selSum = S.expenses.filter(e => sel.includes(e.id)).reduce((a, e) => a + e.usd, 0);
+  const accept = ids => { act(n => n.expenses.forEach(e => { if (ids.includes(e.id)) { e.status = 'accepted'; e.acc = e.usd; e.restRejected = false; } })); setSel([]); say('Принято: ' + ids.length + ' · записи больше не редактируются'); };
+  const withComment = (e, kind) => c.ask({ title: (kind === 'returned' ? 'Вернуть: ' : 'Отклонить: ') + e.name, note: kind === 'returned' ? 'Расход вернётся автору на доработку. Деньги остаются у него под отчётом.' : 'Отклонённый расход остаётся «под отчётом» у автора — он должен вернуть деньги или подтвердить трату.',
+    fields: [{ key: 'c', label: 'Комментарий', type: 'textarea', required: true, placeholder: 'Возврат и отклонение — только с комментарием' }], ok: kind === 'returned' ? 'Вернуть' : 'Отклонить', okTone: kind === 'returned' ? 'dark' : 'orange',
+    onOk: v => { act(n => { const x = n.expenses.find(y => y.id === e.id); x.status = kind; x.comment = v.c; }); setSel(s => s.filter(i => i !== e.id)); say(kind === 'returned' ? 'Возвращено автору' : 'Отклонено', 'undo'); } });
+  const partial = e => c.ask({ title: 'Принять частично: ' + e.name, note: 'Хранятся принятая сумма и остаток, требующий решения.',
+    fields: [{ key: 'a', label: 'Принимаемая сумма, ' + (e.cur === 'USD' ? '$' : 'сум') + ' (из ' + money(e.cur, e.amount) + ')', type: 'number', value: e.cur === 'USD' ? Math.round(e.amount * 0.75) / 100 : Math.round(e.amount * 0.75), required: true }, { key: 'c', label: 'Комментарий', type: 'textarea', required: true, value: '' }],
+    validate: v => { const a = e.cur === 'USD' ? Math.round(+v.a * 100) : +v.a; return a > 0 && a < e.amount ? '' : 'Сумма меньше полной'; }, ok: 'Принять частично',
+    onOk: v => { act(n => { const x = n.expenses.find(y => y.id === e.id); const a = e.cur === 'USD' ? Math.round(+v.a * 100) : +v.a; x.status = 'partial'; x.acc = toUsd(e.cur, a, e.rate || RATE); x.comment = v.c; }); say('Принято частично — остаток ждёт решения'); } });
+  const zoom = e => c.ask({ title: 'Чек: ' + e.name, body: html`<div className="mt-3 flex gap-4"><${Receipt} e=${e} big /><div className="text-sm space-y-1"><div className="text-slate-500">Контрагент</div><div className="font-medium">${e.vendor}</div><div className="text-slate-500 pt-2">Сумма</div><div className="num font-semibold">${money(e.cur, e.amount)}${e.rate ? ' · курс ' + nf0.format(e.rate) + ' = ' + usd(e.usd) : ''}</div><div className="text-slate-500 pt-2">Внесено</div><div>${P[e.who].name}, ${fdy(e.date)}</div></div></div>` });
+  const filters = [['review', 'На проверке'], ['all', 'Все'], ['accepted', 'Принятые'], ['returned', 'Возвращённые'], ['rejected', 'Отклонённые']];
+  return html`<div className="space-y-4">
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <${Card}><${Stat} label="Ждут решения" value=${sent.length + ' · ' + usd(sent.reduce((a, e) => a + e.usd, 0))} tone="amber" /><//>
+      <${Card}><${Stat} label="Принято за период" value=${usd(all.reduce((a, e) => a + e.acc, 0))} hint="21–30.10" tone="green" /><//>
+      <${Card}><${Stat} label="Возвращено автору" value=${all.filter(e => e.status === 'returned').length} tone="orange" /><//>
+      <${Card}><${Stat} label="Отклонено" value=${all.filter(e => e.status === 'rejected').length} tone="red" /><//></div>
+    <${Card} pad=${false}>
+      <div className="px-4 sm:px-5 pt-4 flex flex-wrap items-center gap-2">
+        <div className="flex gap-1.5 overflow-x-auto no-scrollbar">${filters.map(([v, l]) => html`<button key=${v} onClick=${() => go({ expFilter: v })} className=${cx('shrink-0 rounded-full px-3 py-1 text-xs font-medium ring-1', f === v ? 'bg-slate-900 text-white ring-slate-900' : 'bg-white text-slate-600 ring-slate-200')}>${l}</button>`)}</div>
+        <div className="flex-1"></div>
+        <select className="rounded-lg border border-slate-300 text-xs px-2 py-1.5" value=${fw} onChange=${e => go({ expWho: e.target.value })}>
+          <option value="all">Все исполнители</option><option value="bakh">Бахтиёр, прораб</option><option value="ulug">Улугбек, закупщик</option><option value="owner">Оплачено напрямую</option></select></div>
+      <div className="mx-4 sm:mx-5 mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-orange-50 ring-1 ring-orange-200 px-3 py-2">
+        <span className="text-sm text-orange-900 flex-1">${sel.length ? 'Выбрано ' + sel.length + ' на ' + usd(selSum) : 'Отметьте расходы галочками или примите все сразу'}</span>
+        <${Btn} size="sm" disabled=${!sel.length} icon="check" onClick=${() => accept(sel)}>Принять выбранные<//>
+        <${Btn} size="sm" tone="ghost" disabled=${!sent.length} onClick=${() => accept(sent.map(e => e.id))}>Принять все (${sent.length})<//></div>
+      <div className="mt-2 divide-y divide-slate-100">
+        ${list.length === 0 && html`<div className="px-5 py-10 text-center text-sm text-slate-500">Здесь пусто — всё решено</div>`}
+        ${list.map(e => html`<div key=${e.id} className="px-4 sm:px-5 py-3 flex gap-3">
+          <div className="pt-1 w-4">${e.status === 'sent' && html`<input type="checkbox" className="accent-orange-600 w-4 h-4" checked=${sel.includes(e.id)} onChange=${() => setSel(s => (s.includes(e.id) ? s.filter(i => i !== e.id) : [...s, e.id]))} />`}</div>
+          <button onClick=${() => zoom(e)} title="Открыть чек"><${Receipt} e=${e} /></button>
+          <div className="flex-1 min-w-0">
+            <div className="flex flex-wrap items-start gap-x-3 gap-y-1"><div className="flex-1 min-w-0"><div className="font-medium text-slate-900 text-sm">${e.name}</div>
+              <div className="text-xs text-slate-500 num">${nf0.format(e.qty)} ${e.unit} × ${money(e.cur, e.price)}${e.rate ? ' · курс ' + nf0.format(e.rate) : ''} · ${e.vendor}</div></div>
+              <div className="text-right"><div className="num font-semibold text-sm">${money(e.cur, e.amount)}</div>${e.cur !== 'USD' && html`<div className="num text-[11px] text-slate-500">${usd(e.usd)}</div>`}</div></div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]"><${ExpChip} s=${e.status} /><${Chip}>${SECN[e.sec]}<//><${Chip}>${e.type}<//>
+              <span className="text-slate-500">${P[e.who].short} · ${fd(e.date)}${e.payer === 'direct' ? ' · оплачено напрямую владельцем' : ' · из подотчёта'}</span>${e.auto && html`<${Chip} tone="violet" icon="spark">создано автоматически из договора<//>`}</div>
+            ${e.comment && html`<div className=${cx('mt-1.5 text-xs', e.status === 'rejected' ? 'text-red-700' : e.status === 'returned' ? 'text-orange-700' : 'text-slate-600')}>«${e.comment}»</div>`}
+            ${e.status === 'partial' && html`<div className="mt-1.5 text-xs text-amber-800 num">Принято ${usd(e.acc)} · остаток ${usd(e.usd - e.acc)} ${e.restRejected ? 'отклонён' : 'требует решения'}</div>`}
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              ${e.status === 'sent' && html`<${Btn} size="sm" icon="check" onClick=${() => accept([e.id])}>Принять<//><${Btn} size="sm" tone="ghost" onClick=${() => partial(e)}>Частично<//><${Btn} size="sm" tone="ghost" icon="undo" onClick=${() => withComment(e, 'returned')}>Вернуть<//><${Btn} size="sm" tone="red" icon="x" onClick=${() => withComment(e, 'rejected')}>Отклонить<//>`}
+              ${e.status === 'partial' && !e.restRejected && html`<${Btn} size="sm" onClick=${() => accept([e.id])}>Принять остаток<//><${Btn} size="sm" tone="red" onClick=${() => { act(n => { n.expenses.find(y => y.id === e.id).restRejected = true; }); say('Остаток отклонён — остаётся под отчётом у автора', 'undo'); }}>Отклонить остаток<//>`}
+              ${e.status === 'accepted' && html`<span className="inline-flex items-center gap-1 text-[11px] text-slate-500"><${Icon} n="lock" s=${12} />Принятая запись не редактируется</span>
+                <${Btn} size="sm" tone="link" onClick=${() => c.ask({ title: 'Корректировка: ' + e.name, note: 'Исходная запись не меняется. Добавится видимая корректировка с основанием — её увидят обе стороны.', fields: [{ key: 'a', label: 'Сумма корректировки, $', type: 'number', value: '-10' }, { key: 'c', label: 'Основание', type: 'textarea', required: true }], ok: 'Добавить корректировку', onOk: () => say('Корректировка добавлена в журнал с основанием') })}>Корректировка<//>`}
+              ${e.status === 'returned' && html`<span className="text-[11px] text-orange-700">Ждёт исправления от ${P[e.who].short}</span>`}
+            </div></div></div>`)}</div><//>
+  </div>`;
+}
+
+/* ---------- 6. Работы и приёмка ---------- */
+function WorkCard({ w, mobile }) {
+  const c = useC(); const { S, ui } = c; const ct = CT[w.c]; const cs = S.cs[w.c];
+  const me = ui.ch === 'web' ? 'owner' : ui.who;
+  const canAct = w.status === 'pending' && (ct.receiver === me || me === 'owner');
+  const prev = workCalc(S, w);
+  const st = { pending: ['Ждёт приёмки', 'amber'], accepted: ['Принято полностью', 'green'], partial: ['Принято частично', 'green'], remarks: ['Принято с замечаниями', 'amber'], returned: ['Возвращено', 'red'] }[w.status];
+  return html`<div className="bg-white rounded-2xl ring-1 ring-slate-200 shadow-sm p-4">
+    <div className="flex items-start gap-3"><${Avatar} who=${ct.to} />
+      <div className="flex-1 min-w-0"><div className="font-semibold text-slate-900 text-sm">${P[ct.to].name} · ${w.stage ? 'этап «' + w.stage + '»' : ct.title.toLowerCase() + ' ' + w.vol + ' ' + ct.unit}</div>
+        <div className="text-xs text-slate-500">${ct.model} · ${ct.short} · сдано ${fd(w.date)} · приёмщик: ${ct.receiver === 'owner' ? 'Ganiev Development' : P[ct.receiver].short}</div></div>
+      <${Chip} tone=${st[1]}>${st[0]}<//></div>
+    ${!w.fix && html`<div className="mt-3"><div className="flex justify-between text-xs text-slate-500 mb-1 num"><span>Объём по договору ${ct.total} ${ct.unit}</span><span>принято ${cs.accVol || 0} · на приёмке ${S.works.filter(x => x.c === w.c && x.status === 'pending').reduce((a, x) => a + x.vol, 0)}</span></div>
+      <div className="relative h-2.5 rounded-full bg-slate-100 overflow-hidden"><div className="absolute inset-y-0 left-0 bg-emerald-500" style=${{ width: pct(cs.accVol || 0, ct.total) + '%' }}></div>
+        ${w.status === 'pending' && html`<div className="absolute inset-y-0 bg-amber-300" style=${{ left: pct(cs.accVol || 0, ct.total) + '%', width: pct(w.vol, ct.total) + '%' }}></div>`}</div>
+      <div className="mt-1 text-[11px] text-slate-500">${w.status === 'pending' ? 'Сдано ' + w.vol + ' ' + ct.unit + ' из ' + ct.total : ''}</div></div>`}
+    <div className=${cx('mt-3 flex gap-2 overflow-x-auto no-scrollbar', mobile && '-mx-1 px-1')}>${Array.from({ length: w.photos }).map((_, i) => html`<${Photo} key=${i} i=${i + (w.c === 'nodir' ? 2 : 0)} label=${'фото ' + (i + 1)} />`)}${w.video ? html`<${Photo} i=${4} label="видео" video=${true} />` : null}</div>
+    ${w.comment && html`<div className="mt-2 text-xs text-slate-600">Комментарий исполнителя: «${w.comment}»</div>`}
+    ${w.status === 'pending' && html`<div className="mt-3 rounded-xl bg-slate-50 ring-1 ring-slate-200 px-3 py-2">
+      ${!w.fix ? html`<${Row} k="Начислено при полной приёмке" v=${w.vol + ' × ' + money(ct.cur, ct.rate) + ' = ' + money(ct.cur, prev.accrued)} />` : html`<${Row} k="Сумма этапа" v=${money(ct.cur, prev.accrued)} />`}
+      <${Row} k="Зачёт аванса" v=${'− ' + money(ct.cur, prev.adv)} /><${Row} k="К оплате" v=${money(ct.cur, prev.toPay)} strong tone="green" /></div>`}
+    ${w.res && html`<div className="mt-3 rounded-xl bg-emerald-50 ring-1 ring-emerald-200 px-3 py-2">
+      ${!w.fix && html`<${Row} k="Принято" v=${w.res.accVol + ' ' + ct.unit + ' × ' + money(ct.cur, ct.rate) + ' = ' + money(ct.cur, w.res.accrued)} />`}
+      <${Row} k="Зачтён аванс" v=${'− ' + money(ct.cur, w.res.adv)} />${w.res.hold > 0 && html`<${Row} k="Удержание до исправления" v=${'− ' + money(ct.cur, w.res.hold)} tone="amber" />`}
+      <${Row} k=${w.paid ? 'Оплачено' : 'К оплате'} v=${money(ct.cur, w.res.toPay)} strong tone="green" />
+      ${w.res.comment && html`<div className="text-xs text-amber-800 pb-1">Замечание: «${w.res.comment}»</div>`}
+      ${w.id !== 'w3' && html`<ul className="mt-1 mb-1 text-[11px] text-emerald-900 space-y-0.5">
+        <li>✓ Начислена оплата по договору, закрыта часть аванса</li><li>✓ Сдвинут прогресс этапа «${SECN[ct.section]}»</li>
+        <li>✓ Попало в отчёт уровнем выше${ct.from === 'bakh' ? ': прораб → генподрядчик → клиент' : ': генподрядчик → клиент'} — без имён и цен субподряда</li><li>✓ ${ct.from === 'owner' ? 'У вас' : 'У ' + P[ct.from].short} в «Ждёт вас»: оплатить ${money(ct.cur, w.res.toPay)}</li></ul>`}</div>`}
+    ${w.status === 'returned' && html`<div className="mt-3"><${Note} tone="red" icon="undo">Возвращено: «${w.back}»<//></div>`}
+    ${canAct && html`<div className="mt-3 grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
+      <${Btn} size="sm" icon="check" onClick=${() => acceptWorkModal(c, w, 'full')}>Принять полностью<//>
+      ${!w.fix && html`<${Btn} size="sm" tone="ghost" onClick=${() => acceptWorkModal(c, w, 'partial')}>Частично<//>`}
+      <${Btn} size="sm" tone="ghost" onClick=${() => acceptWorkModal(c, w, 'remarks')}>С замечаниями<//>
+      <${Btn} size="sm" tone="red" icon="undo" onClick=${() => returnWorkModal(c, w)}>Вернуть<//></div>`}
+    ${w.status === 'pending' && ct.receiver !== 'owner' && me === 'owner' && html`<div className="mt-2 text-[11px] text-slate-500">Приёмщик по договору — ${P[ct.receiver].short}. Вы — передающий: видите приёмку и можете оспорить до оплаты.</div>`}
+  </div>`;
+}
+function WorksWeb() {
+  const { S } = useC();
+  return html`<div className="space-y-4">
+    <${Note} tone="slate" icon="check">Приёмщик подтверждает факт работ, деньги передаёт заказчик. Принятый объём сам начисляет оплату, закрывает аванс, двигает прогресс этапа и попадает в отчёт уровнем выше.<//>
+    <div className="grid xl:grid-cols-2 gap-4 items-start">${S.works.map(w => html`<${WorkCard} key=${w.id} w=${w} />`)}</div></div>`;
+}
+
+/* ---------- 7. Отчёт по траншу ---------- */
+function Report() {
+  const c = useC(); const { S, act, say, ui, go } = c; const m = salom(S);
+  const t2 = S.tranches[1], t3 = S.tranches[2];
+  const sh = S.cs.sherzod, nd = S.cs.nodir;
+  const clientRows = [
+    ['Этап 2. Стены и инженерия', 'Кладка перегородок', (sh.accVol || 0) + ' из 300 м²', sh.accVol ? 'принято' : 'сдано, на приёмке'],
+    ['', 'Штукатурка стен по маякам', '1 840 из 2 560 м²', 'принято'], ['', 'Электромонтаж', '290 из 320 точек · щит и слаботочка', 'принято'], ['', 'Сантехника', '44 из 48 точек', 'принято'],
+    ['Этап 3. Чистовые (начат)', 'Укладка плитки', (nd.accVol || 0) + ' из 1 800 м²', nd.accVol ? 'принято' : 'сдано, на приёмке'], ['', 'Потолки из гипсокартона', 'профиль закуплен', 'в работе'],
+  ];
+  const acc = S.expenses.filter(e => e.acc && !e.internal);
+  const types = [...new Set(acc.map(e => e.type))];
+  const secs = [...new Set(acc.map(e => e.sec))];
+  const cell = (s, t) => acc.filter(e => e.sec === s && e.type === t).reduce((a, e) => a + e.acc, 0);
+  const photos = 36 + S.works.filter(w => w.res).reduce((a, w) => a + w.photos, 0);
+  const exportCsv = () => {
+    const rows = ui.reportView === 'client'
+      ? [['Отчёт по траншу 2 — Salom Penthouse', '', '', ''], ['Этап', 'Работы', 'Объём', 'Статус'], ...clientRows]
+      : [['Сводка «раздел × тип затрат» — принятые расходы 21–30.10, USD', ...types], ...secs.map(s => [SECN[s], ...types.map(t => (cell(s, t) / 100).toFixed(2))])];
+    const csv = '﻿' + rows.map(r => r.map(x => '"' + String(x).replace(/"/g, '""') + '"').join(';')).join('\r\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = 'Salom_otchet_transh2_' + (ui.reportView === 'client' ? 'klient' : 'vnutr') + '.csv'; a.click();
+    say('Excel-файл (CSV) скачан — ровно то, что на экране');
+  };
+  const requestT3 = () => {
+    const doIt = () => { act(n => { n.tranches[2].status = 'requested'; }); say('Транш 3 запрошен у клиента'); };
+    if (S.report.status !== 'accepted') c.ask({ title: 'Запросить транш 3?', noteTone: 'amber', note: 'Отчёт по траншу 2 ещё не принят клиентом. Запрос не блокируется — клиент увидит предупреждение и неотчитанный остаток перед передачей денег.', ok: 'Запросить всё равно', onOk: doIt });
+    else doIt();
+  };
+  const stLabel = { ready: ['Собран, не отправлен', 'amber'], sent: ['Отправлен клиенту · ждёт приёмки этапа', 'amber'], accepted: ['Клиент принял этап 2', 'green'] }[S.report.status];
+  return html`<div className="space-y-4">
+    <div className="bg-white rounded-2xl ring-1 ring-slate-200 shadow-sm p-5">
+      <div className="flex flex-wrap items-start gap-4">
+        <div className="flex-1 min-w-[220px]"><div className="text-xs text-slate-500">Отчёт исполнителя заказчику</div><h2 className="text-lg font-bold text-slate-900">Транш 2 · ${usd(t2.amount)} · получен ${fdy(t2.got)}</h2>
+          <div className="mt-1 flex flex-wrap gap-1.5"><${Chip} tone=${stLabel[1]}>${stLabel[0]}<//><${Chip} tone="violet" icon="spark">собран автоматически из подтверждённого ниже<//></div></div>
+        <div className="flex flex-wrap gap-2 no-print">
+          <${Btn} tone="ghost" size="sm" icon="download" onClick=${exportCsv}>Excel<//><${Btn} tone="ghost" size="sm" icon="printer" onClick=${() => window.print()}>PDF<//>
+          ${S.report.status === 'ready' && html`<${Btn} size="sm" icon="send" onClick=${() => { act(n => { n.report.status = 'sent'; n.tranches[1].status = 'reporting'; }); say('Отчёт отправлен клиенту — он увидит ровно этот вид'); }}>Отправить клиенту<//>`}</div></div>
+      <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+        <${Stat} label="Этап 2 освоен" value=${pct(m.stages[1].factLive, m.stages[1].plan) + '%'} hint="по бюджету этапа" />
+        <${Stat} label="Фото и видео" value=${photos} hint="из сданных работ" />
+        <${Stat} label="Срок этапа 2" value="15.10" hint=${'просрочка ' + daysLate('2026-10-15') + ' дн'} tone="red" />
+        <${Stat} label="Неотчитанный остаток" value=${S.report.status === 'accepted' ? '$0' : 'этап 2'} hint=${S.report.status === 'accepted' ? 'транш 2 закрыт' : 'не принят клиентом'} tone=${S.report.status === 'accepted' ? 'green' : 'amber'} /></div></div>
+    <div className="no-print"><${Seg} value=${ui.reportView} onChange=${v => go({ reportView: v })} options=${[['client', 'Как увидит клиент'], ['internal', 'Внутренняя сводка']]} /></div>
+    ${ui.reportView === 'client' ? html`<${Card} title="Что увидит клиент" sub="Договор «под ключ»: только этапы, объёмы и фото. Без себестоимости, наценки, имён и цен субподряда.">
+        <div className="overflow-x-auto"><table className="w-full text-sm min-w-[520px]"><thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500"><th className="font-medium py-2">Этап</th><th className="font-medium">Работы</th><th className="font-medium">Объём</th><th className="font-medium">Статус</th></tr></thead>
+          <tbody>${clientRows.map((r, i) => html`<tr key=${i} className="border-t border-slate-100"><td className="py-2 font-medium text-slate-900">${r[0]}</td><td>${r[1]}</td><td className="num">${r[2]}</td><td><${Chip} tone=${r[3] === 'принято' ? 'green' : 'amber'}>${r[3]}<//></td></tr>`)}</tbody></table></div>
+        <div className="mt-3 flex gap-2 overflow-x-auto no-scrollbar">${[0, 1, 2, 3, 4].map(i => html`<${Photo} key=${i} i=${i} label=${['кладка', 'штукатурка', 'щит', 'сантехника', 'плитка'][i]} />`)}</div><//>`
+    : html`<${Card} title="Сводка «раздел × тип затрат»" sub="Принятые расходы за 21–30.10 из журнала макета, USD. Внутренние передачи (авансы и оплаты субподряду) не удваивают расход.">
+        <div className="overflow-x-auto"><table className="w-full text-sm num min-w-[520px]"><thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500"><th className="font-medium py-2">Раздел</th>${types.map(t => html`<th key=${t} className="font-medium text-right">${t}</th>`)}<th className="font-medium text-right">Итого</th></tr></thead>
+          <tbody>${secs.map(s => html`<tr key=${s} className="border-t border-slate-100"><td className="py-2">${SECN[s]}</td>${types.map(t => html`<td key=${t} className="text-right">${cell(s, t) ? usd(cell(s, t)) : '—'}</td>`)}<td className="text-right font-semibold">${usd(types.reduce((a, t) => a + cell(s, t), 0))}</td></tr>`)}
+            <tr className="border-t-2 border-slate-200 font-semibold"><td className="py-2">Итого</td>${types.map(t => html`<td key=${t} className="text-right">${usd(secs.reduce((a, s) => a + cell(s, t), 0))}</td>`)}<td className="text-right">${usd(acc.reduce((a, e) => a + e.acc, 0))}</td></tr></tbody></table></div>
+        <div className="mt-3 text-xs text-slate-500">Принятые работы субподряда: ${S.works.filter(w => w.res).map(w => P[CT[w.c].to].short + ' — ' + money(CT[w.c].cur, w.res.accrued)).join(' · ')}</div><//>`}
+    <${Card} title="Следующий транш" sub="Если прошлый не закрыт отчётом — предупреждаем, но не блокируем (открытый вопрос 3)">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex-1 min-w-[200px]"><div className="text-sm font-medium text-slate-900">Транш 3 · ${usd(t3.amount)} · ${t3.stage}</div>
+          <div className="text-xs text-slate-500">${{ plan: 'Ещё не запрошен', requested: 'Запрошен — ждём, когда клиент нажмёт «Передал»', sent: 'Клиент нажал «Передал» — подтвердите получение', received: 'Получен ' + fdy(TODAY) + ' · учтён в балансе' }[t3.status]}</div></div>
+        ${t3.status === 'plan' && html`<${Btn} icon="send" onClick=${requestT3}>Запросить транш 3<//>`}
+        ${t3.status === 'sent' && html`<${Btn} icon="hand" onClick=${() => { act(n => { n.tranches[2].status = 'received'; n.tranches[2].got = TODAY; }); say('«Получил» — транш 3 учтён: получено от клиента ' + usd(m.clientRec + t3.amount)); }}>Получил<//>`}</div>
+      <div className="mt-3 rounded-xl bg-slate-50 ring-1 ring-dashed ring-slate-300 p-3 no-print"><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">Действия клиента (демо — в жизни он жмёт на своей странице)</div>
+        <div className="flex flex-wrap gap-2">
+          <${Btn} size="sm" tone="ghost" disabled=${S.report.status !== 'sent'} onClick=${() => { act(n => { n.report.status = 'accepted'; n.tranches[1].status = 'closed'; n.stageClient[2] = 'accepted'; }); say('Клиент принял этап 2 — транш 2 закрыт отчётом'); }}>Клиент принял этап 2<//>
+          <${Btn} size="sm" tone="ghost" disabled=${t3.status !== 'requested'} onClick=${() => { act(n => { n.tranches[2].status = 'sent'; }); say('Клиент нажал «Передал» ' + usd(t3.amount), 'hand'); }}>Клиент передал транш 3<//></div></div><//>
+  </div>`;
+}
+
+/* ---------- 8. Предложение заказчику (страница по ссылке) ---------- */
+function Proposal() {
+  const c = useC(); const { S, act, say } = c; const pr = S.proposal; const K = KITCHEN;
+  const [step, setStep] = useState(pr.login ? 'in' : 'phone');
+  const approve = () => c.ask({ title: 'Согласовать предложение?', note: 'Это фиксация договорённости сторон и учёт, а не юридический документ. Согласие подтверждается вашим входом по номеру телефона.', ok: 'Согласовать', okTone: 'green',
+    onOk: () => { act(n => { n.proposal.status = 'approved'; n.proposal.at = TODAY; }); say('Согласовано. Договор → «согласован». Следующий шаг — аванс 40%'); } });
+  const back = () => c.ask({ title: 'Вернуть с комментарием', fields: [{ key: 'c', label: 'Что изменить', type: 'textarea', required: true, value: 'Можно ли начать 10.11? И фартук — плитка 8 м², а не 6.' }], ok: 'Вернуть', okTone: 'dark',
+    onOk: v => { act(n => { n.proposal.status = 'returned'; n.proposal.comment = v.c; }); say('Возвращено исполнителю с комментарием', 'undo'); } });
+  return html`<div className="max-w-3xl mx-auto">
+    <div className="no-print mb-3 flex items-center gap-2 rounded-xl bg-white ring-1 ring-slate-200 px-3 py-2 text-xs text-slate-500">
+      <${Icon} n="lock" s=${13} className="text-emerald-600" /><span className="num">otchetnost.uz/p/${K.code}</span><span className="flex-1"></span><span>страница по ссылке — так её видит клиент</span></div>
+    ${step !== 'in' ? html`<div className="bg-white rounded-2xl ring-1 ring-slate-200 shadow-sm p-6 max-w-sm mx-auto text-center">
+        <div className="w-12 h-12 rounded-2xl bg-violet-600 text-white grid place-items-center mx-auto"><${Icon} n="file" s=${22} /></div>
+        <h2 className="mt-3 font-bold text-slate-900">Ganiev Development прислал вам предложение</h2><p className="text-sm text-slate-500 mt-1">${K.title}, ${K.addr}</p>
+        <div className="mt-5 text-left space-y-3">
+          <label className="block"><span className="text-xs font-medium text-slate-600">Номер телефона</span><input className=${cx(inputCls, 'mt-1 num')} value="+998 90 123 45 67" readOnly /></label>
+          ${step === 'code' && html`<label className="block"><span className="text-xs font-medium text-slate-600">Код из SMS или Telegram</span><input className=${cx(inputCls, 'mt-1 num tracking-[0.5em] text-center')} value="4 8 1 5" readOnly /><span className="text-[11px] text-slate-400">в макете код подставлен</span></label>`}
+          <${Btn} full onClick=${() => (step === 'phone' ? setStep('code') : (act(n => { n.proposal.login = true; }), setStep('in')))}>${step === 'phone' ? 'Получить код' : 'Войти и открыть'}<//></div>
+        <p className="mt-4 text-[11px] text-slate-400">Без регистрации и пароля. Полный кабинет клиенту не нужен (открытый вопрос 4).</p></div>`
+    : html`<div className="space-y-4">
+        ${pr.status === 'approved' && html`<${Note} tone="green" icon="check">Согласовано ${fdy(pr.at)} · подтверждено входом по номеру +998 90 ••• 45 67. Договор перешёл в статус «согласован». Следующий шаг: вы передаёте аванс 40% ${usd(K.tranches[0][2])}, исполнитель нажимает «Получил».<//>`}
+        ${pr.status === 'returned' && html`<${Note} tone="orange" icon="undo">Вы вернули предложение с комментарием: «${pr.comment}». Исполнитель пришлёт новую редакцию.<//>`}
+        <div className="bg-white rounded-2xl ring-1 ring-slate-200 shadow-sm overflow-hidden">
+          <div className="bg-violet-600 text-white p-5"><div className="text-xs text-violet-100">Предложение · ред. 1 от 30.10.2026</div><h2 className="text-xl font-bold">${K.title}</h2>
+            <div className="text-sm text-violet-100">${K.addr}</div>
+            <div className="mt-4 grid grid-cols-3 gap-3 num"><div><div className="text-[11px] text-violet-200">Сумма</div><div className="text-lg font-bold">${usd(K.total)}</div></div>
+              <div><div className="text-[11px] text-violet-200">Срок</div><div className="font-semibold">${fd(K.start)} – ${fd(K.end)}</div></div><div><div className="text-[11px] text-violet-200">Модель</div><div className="font-semibold">Под ключ</div></div></div></div>
+          <div className="p-5 space-y-5">
+            <div className="text-sm text-slate-600"><b className="text-slate-900">Стороны:</b> заказчик — ${K.client}; исполнитель — Ganiev Development</div>
+            <div><h3 className="font-semibold text-slate-900 mb-2">Смета</h3><div className="divide-y divide-slate-100">${K.lines.map(([n, q, u, p]) => html`<div key=${n} className="flex items-baseline gap-3 py-2 text-sm"><span className="flex-1 text-slate-800">${n}</span><span className="num text-slate-500 text-xs">${q} ${u}${q > 1 ? ' × ' + usd(p) : ''}</span><span className="num font-medium w-24 text-right">${usd(q * p)}</span></div>`)}
+              <div className="flex justify-between pt-2 text-sm font-bold"><span>Итого</span><span className="num">${usd(K.total)}</span></div></div></div>
+            <div><h3 className="font-semibold text-slate-900 mb-2">Этапы и транши</h3><div className="space-y-2">${K.tranches.map(([n, p, a, d, w], i) => html`<div key=${n} className="flex items-center gap-3 rounded-xl ring-1 ring-slate-200 p-3">
+              <div className="w-8 h-8 rounded-lg bg-violet-50 text-violet-700 grid place-items-center font-bold text-sm">${i + 1}</div><div className="flex-1 min-w-0"><div className="text-sm font-medium">${n} · ${p}%</div><div className="text-xs text-slate-500">${w}</div></div>
+              <div className="text-right num"><div className="font-semibold text-sm">${usd(a)}</div><div className="text-xs text-slate-500">до ${fd(d)}</div></div></div>`)}</div></div>
+            <div className="text-sm text-slate-600 space-y-1"><h3 className="font-semibold text-slate-900 mb-1">Условия</h3>
+              <p>Отчётность: этапы и фото — по каждому траншу вы увидите отчёт и примете этап.</p><p>Материалы и фурнитура — исполнитель. Встраиваемая техника — заказчик.</p><p>Гарантия 12 месяцев на монтаж. Изменения — новой редакцией с вашим согласием.</p></div>
+            <p className="text-[11px] text-slate-400">Себестоимость и наценка исполнителя в предложение не входят.</p></div></div>
+        ${pr.status === 'proposed' && html`<div className="sticky bottom-3 bg-white/90 backdrop-blur rounded-2xl ring-1 ring-slate-200 shadow-lg p-3 flex gap-2">
+          <${Btn} full size="lg" tone="ghost" icon="undo" onClick=${back}>Вернуть с комментарием<//><${Btn} full size="lg" icon="check" onClick=${approve}>Согласовать<//></div>`}</div>`}
+  </div>`;
+}
+
+/* ======================================================================
+   TELEGRAM MINI APP (исполнители на объекте)
+   ====================================================================== */
+const TG_NOTES = {
+  home: ['Главный экран: проекты и деньги на руках по каждому, итог сверху, «Ждёт вас».', 'ТЗ с. 18', 'Нажмите «Получил» на передаче $2 000 — остаток и подотчёт пересчитаются из журнала.'],
+  expense: ['«+ Расход»: одна строка, голос или фото чека → поля заполнены → «Отправить». ИИ только предлагает.', 'ТЗ с. 11, 18–19', 'Попробуйте: «шкатурка 30 мешок по 85 000 сум, доставка исузу 400 000 сум» — две позиции, опечатка исправлена, курс из сумов в $.'],
+  pod: ['Подотчёт прораба — 7 показателей. Все из подтверждённых операций, ручных итогов нет.', 'ТЗ с. 12–13', 'Примите или отклоните расход в веб-кабинете — цифры здесь изменятся.'],
+  work: ['«Сдать работу»: объём или этап + фото и видео. Приёмщик получает уведомление.', 'ТЗ с. 6, 12', 'Кладка 300 м² × 60 000 сум, аванс 3 000 000: приняли 120 м² → к оплате 4 200 000.'],
+  accept: ['Приёмка у прораба: он заказчик для своей бригады — правила те же, что у генподрядчика.', 'ТЗ с. 6–7, 16', 'Принять полностью, частично (объём), с замечаниями (удержание) или вернуть с комментарием.'],
+  contracts: ['Исполнитель видит свой договор целиком и не видит цену уровнем выше.', 'ТЗ с. 4, 7–8', 'Переключитесь на «Нодир, мастер»: $8/м² видно, $10/м² клиента — нет.'],
+  request: ['Запрос денег: назначение, сумма, разбивка. На подотчёт деньги попадают только после «Получил».', 'ТЗ с. 11', 'После отправки откройте веб-кабинет: у Джурабека в «Ждёт вас» появится «Передал».'],
+};
+function Tg() {
+  const { ui, go, say } = useC();
+  const scr = { home: TgHome, expense: TgExpense, pod: TgPod, work: TgWork, accept: TgAccept, contracts: TgContracts, request: TgRequest }[ui.tg];
+  const titles = { home: 'Отчётность', expense: 'Новый расход', pod: 'Подотчёт', work: 'Сдать работу', accept: 'Приёмка работ', contracts: 'Мои договоры', request: 'Запросить деньги' };
+  const note = TG_NOTES[ui.tg];
+  return html`<div className="bg-slate-200/70 min-h-[calc(100vh-56px)] flex justify-center items-start gap-8 sm:py-8">
+    <div className="relative w-full sm:w-[390px] sm:h-[min(800px,calc(100vh-120px))] sm:min-h-[560px] bg-[#efeff4] sm:rounded-[2.6rem] sm:ring-[10px] sm:ring-slate-900 sm:shadow-2xl overflow-hidden flex flex-col">
+      <div className="hidden sm:flex shrink-0 h-8 bg-white items-center justify-between px-7 text-[12px] font-semibold"><span>18:52</span><span className="w-20 h-5 rounded-full bg-slate-900 absolute left-1/2 -translate-x-1/2 top-1.5"></span><span className="tracking-tight">5G ▮▮▮</span></div>
+      <div className="shrink-0 bg-white border-b border-slate-200 h-12 flex items-center px-3 text-[15px]">
+        ${ui.tg === 'home' ? html`<button className="text-[#2481cc] w-20 text-left" onClick=${() => say('В Telegram эта кнопка закрывает мини-приложение', 'alert')}>Закрыть</button>`
+          : html`<button className="text-[#2481cc] w-20 text-left flex items-center -ml-1" onClick=${() => go({ tg: 'home' })}><${Icon} n="left" s=${20} />Назад</button>`}
+        <div className="flex-1 text-center leading-tight"><div className="font-semibold text-[15px] text-slate-900">${titles[ui.tg]}</div><div className="text-[11px] text-slate-400">мини-приложение</div></div>
+        <div className="w-20 text-right text-slate-400 text-lg">⋯</div></div>
+      <div key=${ui.tg + ui.who} className="flex-1 sm:overflow-y-auto no-scrollbar"><${scr} /></div>
+    </div>
+    <aside className="hidden xl:block w-72 pt-6 space-y-3">
+      <div className="bg-white rounded-2xl ring-1 ring-slate-200 p-4"><div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Этот экран</div>
+        <p className="mt-1 text-sm text-slate-800 leading-relaxed">${note[0]}</p><p className="mt-2 text-[11px] text-slate-400">${note[1]}</p></div>
+      <div className="bg-orange-50 rounded-2xl ring-1 ring-orange-200 p-4"><div className="text-[11px] font-semibold uppercase tracking-wide text-orange-700">Попробуйте</div><p className="mt-1 text-sm text-orange-900 leading-relaxed">${note[2]}</p></div>
+      <div className="bg-white rounded-2xl ring-1 ring-slate-200 p-4 text-xs text-slate-500 leading-relaxed">Интерфейс один для всех ролей — меняется только набор доступного. Сменить исполнителя можно в верхней панели.</div></aside></div>`;
+}
+const TgCard = ({ children, className }) => html`<div className=${cx('bg-white rounded-2xl mx-3 mt-3 p-4', className)}>${children}</div>`;
+const TgH = ({ children, right }) => html`<div className="flex items-center justify-between px-4 mt-5 mb-1"><div className="text-[13px] font-semibold uppercase tracking-wide text-slate-500">${children}</div>${right}</div>`;
+const Sticky = ({ children }) => html`<div className="sticky bottom-0 bg-gradient-to-t from-[#efeff4] via-[#efeff4] to-transparent px-3 pt-6 pb-4 mt-4 flex gap-2">${children}</div>`;
+
+function TgHome() {
+  const c = useC(); const { S, ui, go } = c; const who = ui.who; const items = todos(c, who);
+  if (who === 'bakh') {
+    const p = podFor(S, 'bakh'); const berHands = 124000;
+    return html`<div className="pb-6">
+      <div className="mx-3 mt-3 rounded-2xl p-4 text-white bg-gradient-to-br from-slate-900 to-slate-700">
+        <div className="flex items-center gap-2"><${Avatar} who="bakh" s="w-9 h-9" /><div className="leading-tight"><div className="font-semibold">Бахтиёр Рахимов</div><div className="text-xs text-slate-300">прораб · 2 проекта</div></div></div>
+        <div className="mt-4 text-xs text-slate-300">Деньги на руках · всего</div><div className="num text-3xl font-bold">${usd(p.balance + berHands)}</div>
+        <div className="text-xs text-slate-300 mt-1 num">под отчётом ${usd(p.under + 161000)} · к оплате вам ${usd(p.toPay)}</div></div>
+      <div className="mx-3 mt-3 grid grid-cols-4 gap-2">
+        ${[['plus', '+ Расход', 'expense', true], ['wallet', 'Запросить', 'request'], ['check', 'Приёмка', 'accept'], ['file', 'Договоры', 'contracts']].map(([ic, l, s, main]) => html`<button key=${s} onClick=${() => go({ tg: s, draft: null })}
+          className=${cx('rounded-2xl py-3 flex flex-col items-center gap-1.5 text-[12px] font-medium relative', main ? 'bg-orange-600 text-white' : 'bg-white text-slate-700')}><${Icon} n=${ic} s=${20} />${l}
+          ${s === 'accept' && S.works.some(w => w.status === 'pending' && CT[w.c].receiver === 'bakh') && html`<span className="absolute top-1.5 right-2 w-2 h-2 rounded-full bg-orange-600"></span>`}</button>`)}</div>
+      <${TgH}>Ждёт вас · ${items.filter(i => i.btn).length}<//><div className="px-3"><${TodoList} items=${items} compact /></div>
+      <${TgH}>Мои проекты<//>
+      <div className="mx-3 bg-white rounded-2xl divide-y divide-slate-100">
+        <button onClick=${() => go({ tg: 'pod' })} className="w-full text-left p-4 flex items-center gap-3"><div className="flex-1"><div className="font-semibold text-slate-900">Salom Penthouse</div><div className="text-xs text-slate-500">прораб · договор % от расходов</div></div>
+          <div className="text-right num"><div className="font-semibold">${usd(p.balance)}</div><div className="text-[11px] text-slate-500">под отчётом ${usd(p.under)}</div></div><${Icon} n="right" className="text-slate-300" /></button>
+        <button onClick=${() => c.say('В макете подробно заполнен Salom Penthouse', 'alert')} className="w-full text-left p-4 flex items-center gap-3"><div className="flex-1"><div className="font-semibold text-slate-900">Beruniy 85 A/B</div><div className="text-xs text-slate-500">прораб · затраты + 15%</div></div>
+          <div className="text-right num"><div className="font-semibold">${usd(berHands)}</div><div className="text-[11px] text-slate-500">под отчётом $1 610</div></div><${Icon} n="right" className="text-slate-300" /></button></div>
+      <button onClick=${() => go({ tg: 'pod' })} className="block w-[calc(100%-1.5rem)] mx-3 mt-3 bg-white rounded-2xl p-4 text-left">
+        <div className="flex items-center justify-between"><div className="font-semibold text-slate-900 text-sm">Подотчёт · Salom Penthouse</div><span className="text-[#2481cc] text-sm">все 7 →</span></div>
+        <div className="mt-3 grid grid-cols-3 gap-2 num">${[['Получено', p.received, ''], ['Принято', p.accepted, 'text-emerald-700'], ['На проверке', p.review, 'text-amber-700']].map(([k, v, t]) => html`<div key=${k}><div className="text-[11px] text-slate-500">${k}</div><div className=${cx('font-semibold', t)}>${usd(v)}</div></div>`)}</div></button>
+    </div>`;
+  }
+  const cid = who === 'sherzod' ? 'sherzod' : 'nodir'; const ct = CT[cid]; const cs = S.cs[cid];
+  const got = S.transfers.filter(t => t.to === who && t.status === 'received').reduce((a, t) => a + t.amount, 0);
+  const toPay = cs.accrued - cs.advClosed - cs.hold - cs.paid;
+  return html`<div className="pb-6">
+    <div className="mx-3 mt-3 rounded-2xl p-4 text-white bg-gradient-to-br from-slate-900 to-slate-700">
+      <div className="flex items-center gap-2"><${Avatar} who=${who} s="w-9 h-9" /><div className="leading-tight"><div className="font-semibold">${P[who].name}</div><div className="text-xs text-slate-300">${P[who].label} · 1 проект</div></div></div>
+      <div className="mt-4 text-xs text-slate-300">${toPay > 0 ? 'К оплате вам · всего' : 'Аванс на руках · всего'}</div><div className="num text-3xl font-bold">${money(ct.cur, toPay > 0 ? toPay : Math.max(0, cs.advance - cs.advClosed))}</div>
+      <div className="text-xs text-slate-300 mt-1 num">получено ${money(ct.cur, got)} · начислено ${money(ct.cur, cs.accrued)}</div></div>
+    <div className="mx-3 mt-3 grid grid-cols-3 gap-2">
+      ${[['check', 'Сдать работу', 'work', true], ['wallet', 'Аванс', 'request'], ['file', 'Договор', 'contracts']].map(([ic, l, s, main]) => html`<button key=${s} onClick=${() => go({ tg: s })}
+        className=${cx('rounded-2xl py-3 flex flex-col items-center gap-1.5 text-[12px] font-medium', main ? 'bg-orange-600 text-white' : 'bg-white text-slate-700')}><${Icon} n=${ic} s=${20} />${l}</button>`)}</div>
+    <${TgH}>Ждёт вас<//><div className="px-3"><${TodoList} items=${items} compact /></div>
+    <${TgH}>Мой проект<//>
+    <div className="mx-3 bg-white rounded-2xl p-4"><div className="flex items-center gap-3"><div className="flex-1"><div className="font-semibold text-slate-900">Salom Penthouse</div><div className="text-xs text-slate-500">${ct.title} · заказчик: ${ct.from === 'owner' ? 'Ganiev Development' : P[ct.from].name}</div></div><${Chip} tone="violet">${ct.short}<//></div>
+      <div className="mt-3 flex justify-between text-xs text-slate-500 num"><span>Принято ${cs.accVol} из ${ct.total} ${ct.unit}</span><span>${pct(cs.accVol, ct.total)}%</span></div><div className="mt-1"><${Bar} v=${pct(cs.accVol, ct.total)} /></div></div>
+    <p className="mx-4 mt-3 text-[11px] text-slate-400">Режим отчётности по договору — работы. Расходы с чеками ${P[who].short} не ведёт, поэтому кнопки «+ Расход» нет.</p></div>`;
+}
+
+function TgExpense() {
+  const c = useC(); const { S, ui, act, go, say } = c;
+  const [text, setText] = useState(ui.draft || '');
+  const [items, setItems] = useState(() => (ui.draft ? parseLine(ui.draft) : []));
+  const [receipt, setReceipt] = useState(null);
+  const [payer, setPayer] = useState('pod');
+  const [food, setFood] = useState(null);
+  const [listening, setListening] = useState(false);
+  if (ui.who !== 'bakh') return html`<${TgCard}><p className="text-sm text-slate-600">У ${P[ui.who].short} режим отчётности «работы» — расходы ведёт прораб.</p><div className="mt-3"><${Btn} onClick=${() => go({ tg: 'work' })}>Сдать работу<//></div><//>`;
+  const onText = v => { setText(v); setItems(parseLine(v)); setFood(null); };
+  const upd = (id, k, v) => setItems(xs => xs.map(x => (x.id === id ? { ...x, [k]: v } : x)));
+  const voice = () => { setListening(true); setTimeout(() => { setListening(false); onText('цемент 20 мешков по 6 долларов строймаркет'); }, 900); };
+  const photo = () => { setReceipt('Дунёбунё · накладная S20247'); setText(''); setFood(null);
+    setItems([{ id: uid('i'), name: 'Кафель настенный 30×60', qty: 100, unit: 'м²', price: 500, cur: 'USD', rate: RATE, vendor: 'Дунёбунё', sec: 'tile', type: 'Материал', fixes: [], why: 'распознано с фото накладной' },
+      { id: uid('i'), name: 'Клей плиточный', qty: 10, unit: 'мешок', price: 700, cur: 'USD', rate: RATE, vendor: 'Дунёбунё', sec: 'tile', type: 'Материал', fixes: [], why: 'распознано с фото накладной' }]); };
+  const foodPreset = () => { setText(''); setItems([]); setFood({ rate: 40000, people: 6, days: 5 }); };
+  const all = food ? [{ id: 'food', name: 'Питание бригады: ' + food.people + ' чел × ' + food.days + ' дн × ' + nf0.format(food.rate), qty: food.people * food.days, unit: 'чел.-день', price: +food.rate, cur: 'UZS', rate: RATE, vendor: 'Столовая у объекта', sec: 'common', type: 'Питание' }] : items;
+  const totalUsd = all.reduce((a, x) => a + toUsd(x.cur, Math.round(x.qty * x.price), x.rate), 0);
+  const ok = all.length > 0 && all.every(x => x.sec && x.price > 0);
+  const submit = status => {
+    act(n => all.forEach(x => n.expenses.unshift({ ...mkE(uid('e'), 'bakh', TODAY, x.sec, x.type, x.name, +x.qty, x.unit, x.price, x.cur, x.vendor || '—', { status, payer, receipt: !!receipt }), rate: x.cur === 'UZS' ? +x.rate : null, usd: toUsd(x.cur, Math.round(x.qty * x.price), x.rate) })));
+    say(status === 'draft' ? 'Сохранено в черновик — висит на вас, в подотчёт не входит' : 'Отправлено Джурабеку на проверку: ' + all.length + ' на ' + usd(totalUsd));
+    go({ tg: 'home', draft: null });
+  };
+  const samples = ['кафель 100 м2 по 5$ дунёбунё', 'шкатурка 30 мешок по 85 000 сум, доставка исузу 400 000 сум'];
+  return html`<div>
+    <div className="mx-3 mt-3 flex items-center gap-2 text-xs"><${Chip} tone="slate">Salom Penthouse<//><span className="text-slate-400">· ${fdy(TODAY)}</span></div>
+    <${TgCard} className="!p-3">
+      <textarea rows="2" value=${text} onChange=${e => onText(e.target.value)} placeholder="Напишите как в Telegram: кафель 100 м2 по 5$ дунёбунё" className="w-full resize-none text-[15px] focus:outline-none placeholder:text-slate-400"></textarea>
+      <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
+        <button onClick=${voice} className=${cx('flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium', listening ? 'bg-red-50 text-red-700 animate-pulse' : 'bg-slate-100 text-slate-700')}><${Icon} n="mic" s=${14} />${listening ? 'Слушаю…' : 'Голос'}</button>
+        <button onClick=${photo} className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium bg-slate-100 text-slate-700"><${Icon} n="camera" s=${14} />Фото чека</button>
+        <button onClick=${foodPreset} className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium bg-slate-100 text-slate-700">Питание</button></div><//>
+    ${!all.length && html`<div className="px-4 mt-3 space-y-1.5"><div className="text-[11px] text-slate-500">Примеры — нажмите:</div>${samples.map(s => html`<button key=${s} onClick=${() => onText(s)} className="block text-left text-[13px] text-[#2481cc]">«${s}»</button>`)}</div>`}
+    ${receipt && html`<div className="mx-3 mt-3 flex items-center gap-3 bg-white rounded-2xl p-3"><${Receipt} e=${{ receipt: true, vendor: 'Дунёбунё', cur: 'USD', amount: 57000 }} /><div className="text-xs"><div className="font-medium text-slate-900">${receipt}</div><div className="text-slate-500">ИИ прочитал чек: 2 позиции. Проверьте поля. <span className="text-amber-700">Чтение чеков — в релиз, если успеваем.</span></div></div></div>`}
+    ${food && html`<${TgCard}><div className="font-semibold text-sm text-slate-900">Питание — преднастройка</div><div className="text-xs text-slate-500">ставка × людей × дней; ставка запоминается по проекту</div>
+      <div className="mt-3 grid grid-cols-3 gap-2">${[['rate', 'Ставка, сум'], ['people', 'Людей'], ['days', 'Дней']].map(([k, l]) => html`<label key=${k}><span className="text-[11px] text-slate-500">${l}</span><input type="number" className=${cx(inputCls, 'num mt-0.5')} value=${food[k]} onChange=${e => setFood({ ...food, [k]: e.target.value })} /></label>`)}</div>
+      <div className="mt-2 text-sm num">= ${uzs(food.rate * food.people * food.days)} · ${usd(toUsd('UZS', food.rate * food.people * food.days))} по курсу 12 500</div><//>`}
+    ${!food && items.map((x, i) => html`<div key=${x.id} className="bg-white rounded-2xl mx-3 mt-3 p-4">
+      <div className="flex items-center gap-2 text-[11px] text-violet-700 font-medium"><${Icon} n="spark" s=${13} />ИИ разобрал${items.length > 1 ? ' · позиция ' + (i + 1) : ''}${x.why && html`<span className="text-slate-400 font-normal">· раздел ${x.why}</span>`}</div>
+      ${x.fixes && x.fixes.length > 0 && html`<div className="mt-1 text-[11px] text-emerald-700">Исправлено: ${x.fixes.join(', ')}</div>`}
+      <input className="mt-2 w-full text-[15px] font-semibold text-slate-900 focus:outline-none" value=${x.name} onChange=${e => upd(x.id, 'name', e.target.value)} />
+      <div className="mt-2 grid grid-cols-3 gap-2">
+        <label><span className="text-[11px] text-slate-500">Кол-во</span><input type="number" className=${cx(inputCls, 'num mt-0.5 !px-2')} value=${x.qty} onChange=${e => upd(x.id, 'qty', e.target.value)} /></label>
+        <label><span className="text-[11px] text-slate-500">Ед.</span><select className=${cx(inputCls, 'mt-0.5 !px-1')} value=${x.unit} onChange=${e => upd(x.id, 'unit', e.target.value)}>${UNITS.map(u => html`<option key=${u}>${u}</option>`)}</select></label>
+        <label><span className="text-[11px] text-slate-500">Цена, ${x.cur === 'USD' ? '$' : 'сум'}</span><input type="number" className=${cx(inputCls, 'num mt-0.5 !px-2', x.noPrice && 'ring-2 ring-orange-400')} value=${x.cur === 'USD' ? x.price / 100 : x.price} onChange=${e => upd(x.id, 'price', x.cur === 'USD' ? Math.round(+e.target.value * 100) : +e.target.value)} /></label></div>
+      ${x.cur === 'UZS' && html`<label className="block mt-2"><span className="text-[11px] text-slate-500">Фактический курс (ЦБ ${nf0.format(CB_RATE)} — подсказка)</span><input type="number" className=${cx(inputCls, 'num mt-0.5')} value=${x.rate} onChange=${e => upd(x.id, 'rate', +e.target.value || RATE)} /></label>`}
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <label><span className="text-[11px] text-slate-500">Раздел работ *</span><select className=${cx(inputCls, 'mt-0.5 !px-1', !x.sec && 'ring-2 ring-orange-400')} value=${x.sec} onChange=${e => upd(x.id, 'sec', e.target.value)}><option value="">— выберите —</option>${SEC.map(s => html`<option key=${s.id} value=${s.id}>${s.name}</option>`)}</select></label>
+        <label><span className="text-[11px] text-slate-500">Тип затрат</span><select className=${cx(inputCls, 'mt-0.5 !px-1')} value=${x.type} onChange=${e => upd(x.id, 'type', e.target.value)}>${TYPES.map(t => html`<option key=${t}>${t}</option>`)}</select></label></div>
+      <label className="block mt-2"><span className="text-[11px] text-slate-500">Контрагент</span><input className=${cx(inputCls, 'mt-0.5')} value=${x.vendor} onChange=${e => upd(x.id, 'vendor', e.target.value)} placeholder="магазин, мастер, служба" /></label>
+      <div className="mt-3 flex justify-between items-baseline border-t border-slate-100 pt-2"><span className="text-xs text-slate-500 num">${nf0.format(x.qty)} × ${money(x.cur, x.price)}</span>
+        <span className="num font-bold text-slate-900">${money(x.cur, Math.round(x.qty * x.price))}${x.cur === 'UZS' ? html`<span className="text-xs font-normal text-slate-500"> · ${usd(toUsd('UZS', Math.round(x.qty * x.price), x.rate))}</span>` : ''}</span></div></div>`)}
+    ${all.length > 0 && html`<${TgCard}>
+      <div className="text-[11px] text-slate-500 mb-1.5">Плательщик</div>
+      <${Seg} small value=${payer} onChange=${setPayer} options=${[['pod', 'Из подотчёта'], ['direct', 'Оплатил владелец']]} />
+      ${payer === 'direct' && html`<p className="mt-2 text-[11px] text-slate-500">Войдёт в расход проекта, но не в ваш подотчёт.</p>`}
+      <button onClick=${() => setReceipt(receipt ? null : 'чек.jpg')} className="mt-3 w-full flex items-center gap-3 rounded-xl border border-dashed border-slate-300 p-3 text-left">
+        <${Icon} n=${receipt ? 'check' : 'camera'} className=${receipt ? 'text-emerald-600' : 'text-slate-400'} /><span className="text-sm text-slate-700 flex-1">${receipt ? 'Чек приложен' : 'Приложить фото чека'}</span>
+        <span className="text-[11px] text-slate-400">${receipt ? 'убрать' : 'необязательно'}</span></button><//>`}
+    <p className="mx-4 mt-3 text-[11px] text-slate-400">Обязательны только сумма и раздел. ИИ предлагает — отправляете вы.</p>
+    <${Sticky}><${Btn} tone="ghost" disabled=${!all.length} onClick=${() => submit('draft')}>В черновик<//><${Btn} full size="lg" icon="send" disabled=${!ok} onClick=${() => submit('sent')}>Отправить${all.length ? ' · ' + usd(totalUsd) : ''}<//><//>
+  </div>`;
+}
+
+function TgPod() {
+  const c = useC(); const { S, go } = c; const p = podFor(S, 'bakh');
+  const tiles = [
+    ['Получено', p.received, 'передачи со статусом «Получил»', ''], ['Выплачено', p.paid, 'расходы из подотчёта, кроме черновиков, + возвраты', ''],
+    ['Остаток денег', p.balance, 'получено − выплачено', 'text-slate-900'], ['Принято расходов', p.accepted, 'принятые, с учётом частичных', 'text-emerald-700'],
+    ['На проверке', p.review, 'отправленные, ещё не решённые', 'text-amber-700'], ['Под отчётом', p.under, 'получено − принято − возвраты − зачёты', 'text-amber-700'],
+    ['К оплате вам', p.toPay, 'начислено 10% + перерасход − выплачено − зачёты', 'text-orange-700'],
+  ];
+  const ops = [];
+  S.transfers.filter(t => t.to === 'bakh' && t.status === 'received').forEach(t => ops.push({ d: t.date, k: t.id, t: 'Получил от Джурабека · ' + t.purpose.toLowerCase(), v: t.usd }));
+  S.expenses.filter(e => e.who === 'bakh' && e.payer === 'pod' && e.status !== 'draft').forEach(e => ops.push({ d: e.date, k: e.id, t: e.name, v: -e.usd, st: e.status }));
+  ops.sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : b.v - a.v));
+  let run = 0; ops.forEach(o => { run += o.v; o.run = run; });
+  return html`<div className="pb-6">
+    <div className="mx-3 mt-3 flex items-center gap-2 text-xs"><${Chip}>Salom Penthouse<//><span className="text-slate-400">USD · все цифры из журнала</span></div>
+    <div className="mx-3 mt-3 grid grid-cols-2 gap-2">${tiles.map(([k, v, f, t], i) => html`<div key=${k} className=${cx('bg-white rounded-2xl p-3', i === 6 && 'col-span-2')}>
+      <div className="text-[11px] text-slate-500">${k}</div><div className=${cx('num text-xl font-bold', t || 'text-slate-900')}>${usd(v)}</div><div className="text-[10px] text-slate-400 leading-snug mt-0.5">${f}</div></div>`)}</div>
+    ${p.over > 0 && html`<div className="mx-3 mt-2"><${Note} tone="orange">Перерасход ${usd(p.over)}: принято больше, чем получено — владелец должен вам.<//></div>`}
+    <div className="mx-3 mt-2"><${Note}>Пример ТЗ: получил $10 000, потратил $2 000, принято $1 500 → остаток $8 000, на проверке $500, под отчётом $8 500.<//></div>
+    <${TgH}>Лента операций · остаток после каждой<//>
+    <div className="mx-3 bg-white rounded-2xl divide-y divide-slate-100">${ops.slice().reverse().slice(0, 9).map(o => html`<div key=${o.k} className="px-4 py-2.5 flex items-center gap-3">
+      <div className="flex-1 min-w-0"><div className="text-[13px] text-slate-900 truncate">${o.t}</div><div className="text-[11px] text-slate-400 flex items-center gap-1.5">${fd(o.d)}${o.st && html`<${ExpChip} s=${o.st} />`}</div></div>
+      <div className="text-right num"><div className=${cx('text-[13px] font-semibold', o.v > 0 ? 'text-emerald-700' : 'text-slate-900')}>${o.v > 0 ? '+' : ''}${usd(o.v)}</div><div className="text-[11px] text-slate-400">${usd(o.run)}</div></div></div>`)}</div>
+    <${Sticky}><${Btn} full size="lg" tone="ghost" icon="wallet" onClick=${() => go({ tg: 'request' })}>Запросить деньги<//><${Btn} full size="lg" icon="plus" onClick=${() => go({ tg: 'expense', draft: null })}>Расход<//><//></div>`;
+}
+
+function TgWork() {
+  const c = useC(); const { S, ui, act, go, say } = c;
+  if (ui.who === 'bakh') return html`<${TgCard}><p className="text-sm text-slate-600">У вас договор «% от расходов» — объёмы сдают ваши исполнители, а вы их принимаете.</p><div className="mt-3"><${Btn} onClick=${() => go({ tg: 'accept' })}>Открыть приёмку<//></div><//>`;
+  const cid = ui.who; const ct = CT[cid]; const cs = S.cs[cid];
+  const pending = S.works.filter(w => w.c === cid && w.status === 'pending').reduce((a, w) => a + w.vol, 0);
+  const left = ct.total - cs.accVol - pending;
+  const [vol, setVol] = useState(Math.min(left, cid === 'sherzod' ? 120 : 100));
+  const [photos, setPhotos] = useState(3);
+  const [video, setVideo] = useState(false);
+  const [comment, setComment] = useState('');
+  const accrued = vol * ct.rate, adv = Math.min(cs.advance - cs.advClosed, accrued);
+  const submit = () => { act(n => { n.works.unshift({ id: uid('w'), c: cid, date: TODAY, vol: +vol, photos, video: video ? 1 : 0, comment, status: 'pending' }); }); say('Сдано ' + vol + ' ' + ct.unit + '. ' + (ct.receiver === 'owner' ? 'Ganiev Development' : P[ct.receiver].short) + ' получил уведомление'); go({ tg: 'home' }); };
+  return html`<div>
+    <div className="mx-3 mt-3 rounded-2xl bg-violet-600 text-white p-4"><div className="text-xs text-violet-200">Договор · ${ct.model}</div><div className="font-bold">${ct.title}, ${ct.total} ${ct.unit}</div>
+      <div className="num text-sm mt-1">${ct.total} × ${money(ct.cur, ct.rate)} = ${money(ct.cur, ct.total * ct.rate)}</div><div className="text-xs text-violet-200 mt-1">Аванс ${money(ct.cur, cs.advance)} · приёмщик: ${ct.receiver === 'owner' ? 'Ganiev Development' : P[ct.receiver].name}</div></div>
+    <${TgCard}><div className="flex justify-between text-xs text-slate-500 num"><span>принято ${cs.accVol} · на приёмке ${pending}</span><span>осталось ${left} ${ct.unit}</span></div>
+      <div className="mt-1.5 relative h-2.5 rounded-full bg-slate-100 overflow-hidden"><div className="absolute inset-y-0 left-0 bg-emerald-500" style=${{ width: pct(cs.accVol, ct.total) + '%' }}></div><div className="absolute inset-y-0 bg-amber-300" style=${{ left: pct(cs.accVol, ct.total) + '%', width: pct(pending, ct.total) + '%' }}></div><div className="absolute inset-y-0 bg-orange-500/70" style=${{ left: pct(cs.accVol + pending, ct.total) + '%', width: pct(+vol || 0, ct.total) + '%' }}></div></div>
+      <div className="mt-2 flex gap-3 text-[11px] text-slate-500"><span className="flex items-center gap-1"><i className="w-2 h-2 rounded-full bg-emerald-500"></i>принято</span><span className="flex items-center gap-1"><i className="w-2 h-2 rounded-full bg-amber-300"></i>на приёмке</span><span className="flex items-center gap-1"><i className="w-2 h-2 rounded-full bg-orange-500"></i>сдаёте сейчас</span></div><//>
+    ${left <= 0 ? html`<${TgCard}><p className="text-sm text-slate-600">Весь объём сдан. Ждите приёмки.</p><//>` : html`
+    <${TgCard}><div className="text-sm font-semibold text-slate-900">Какой объём сдаёте?</div>
+      <div className="mt-2 flex items-center gap-2"><input type="number" className=${cx(inputCls, 'num text-lg font-semibold')} value=${vol} onChange=${e => setVol(Math.max(0, Math.min(left, +e.target.value)))} /><span className="text-slate-500">${ct.unit}</span></div>
+      <div className="mt-2 flex gap-1.5">${[40, 60, 120, left].filter((v, i, a) => v <= left && a.indexOf(v) === i).map(v => html`<button key=${v} onClick=${() => setVol(v)} className=${cx('rounded-full px-3 py-1 text-xs font-medium', +vol === v ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600')}>${v === left ? 'всё ' + v : v}</button>`)}</div><//>
+    <${TgCard}><div className="flex items-center justify-between"><div className="text-sm font-semibold text-slate-900">Фото и видео</div><span className="text-[11px] text-slate-400">${photos} фото${video ? ' + видео' : ''}</span></div>
+      <div className="mt-2 flex gap-2 overflow-x-auto no-scrollbar">${Array.from({ length: photos }).map((_, i) => html`<${Photo} key=${i} i=${i} label=${'фото ' + (i + 1)} />`)}${video && html`<${Photo} i=${4} label="видео" video=${true} />`}
+        <button onClick=${() => setPhotos(p => p + 1)} className="w-16 h-16 shrink-0 rounded-lg border-2 border-dashed border-slate-300 grid place-items-center text-slate-400"><${Icon} n="camera" /></button>
+        ${!video && html`<button onClick=${() => setVideo(true)} className="w-16 h-16 shrink-0 rounded-lg border-2 border-dashed border-slate-300 grid place-items-center text-slate-400 text-[11px]">+ видео</button>`}</div>
+      <textarea rows="2" className=${cx(inputCls, 'mt-3')} placeholder="Комментарий: где, какие оси, что учесть" value=${comment} onChange=${e => setComment(e.target.value)}></textarea><//>
+    <${TgCard}><div className="text-[11px] text-slate-500 mb-1">После полной приёмки</div>
+      <${Row} k="Начислено" v=${vol + ' × ' + money(ct.cur, ct.rate) + ' = ' + money(ct.cur, accrued)} /><${Row} k="Зачёт аванса" v=${'− ' + money(ct.cur, adv)} /><${Row} k="К оплате" v=${money(ct.cur, accrued - adv)} strong tone="green" /><//>
+    <${Sticky}><${Btn} full size="lg" icon="send" disabled=${!(+vol > 0) || photos < 1} onClick=${submit}>Сдать ${vol} ${ct.unit}<//><//>`}
+  </div>`;
+}
+
+function TgAccept() {
+  const { S, ui } = useC();
+  const list = S.works.filter(w => CT[w.c].receiver === ui.who || CT[w.c].from === ui.who);
+  if (ui.who !== 'bakh') return html`<${TgCard}><p className="text-sm text-slate-600">У ${P[ui.who].short} нет своих исполнителей — принимать нечего.</p><//>`;
+  return html`<div className="px-3 pt-3 pb-6 space-y-3">
+    <${Note}>Прораб — заказчик для своей бригады: принимает объём, удерживает за замечания, платит остаток. Приёмка уходит вверх как часть его отчёта.<//>
+    ${list.map(w => html`<${WorkCard} key=${w.id} w=${w} mobile />`)}</div>`;
+}
+
+function TgContracts() {
+  const c = useC(); const { S, ui, go, say } = c; const who = ui.who;
+  const lockLine = t => html`<div className="mt-3 flex items-center gap-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500"><${Icon} n="lock" s=${14} />${t}</div>`;
+  if (who === 'bakh') {
+    const p = podFor(S, 'bakh'); const sh = S.cs.sherzod;
+    return html`<div className="pb-6">
+      <${TgH}>Мой договор<//>
+      <div className="mx-3 bg-white rounded-2xl p-4"><div className="flex items-start gap-2"><div className="flex-1"><div className="font-semibold text-slate-900">Прораб объекта · Salom Penthouse</div><div className="text-xs text-slate-500">заказчик: Ganiev Development</div></div><${Chip} tone="violet">в работе<//></div>
+        <div className="mt-3"><${Row} k="Модель" v="10% от принятых расходов" /><${Row} k="Начислено" v=${usd(p.accrued)} /><${Row} k="Выплачено" v="$0" /><${Row} k="Осталось получить" v=${usd(p.toPay)} strong tone="green" /></div>
+        ${S.rights.bakh[1] ? html`<div className="mt-3"><${Note} tone="violet" icon="eye">Владелец открыл вам договор с клиентом: под ключ $450 000.<//></div>` : lockLine('Договор генподрядчика с клиентом скрыт — нет права')}</div>
+      <${TgH} right=${html`<button className="text-[#2481cc] text-sm" onClick=${() => say('Ссылка-приглашение скопирована: t.me/otchetnost_bot?start=SLM7K2', 'link')}>+ Пригласить</button>`}>Мои исполнители<//>
+      <div className="mx-3 bg-white rounded-2xl p-4"><div className="flex items-center gap-3"><${Avatar} who="sherzod" /><div className="flex-1"><div className="font-semibold text-slate-900 text-sm">Шерзод Тошматов</div><div className="text-xs text-slate-500">кладка 300 м² × 60 000 сум</div></div></div>
+        <div className="mt-3"><${Row} k="Аванс выдан" v=${uzs(sh.advance)} /><${Row} k="Принято" v=${sh.accVol + ' из 300 м²'} /><${Row} k="Начислено" v=${uzs(sh.accrued)} /><${Row} k="К оплате" v=${uzs(sh.accrued - sh.advClosed - sh.hold - sh.paid)} strong /></div>
+        <div className="mt-3 flex gap-2"><${Btn} size="sm" tone="ghost" onClick=${() => askTransfer(c, { from: 'bakh', to: 'sherzod', amount: 1000000, cur: 'UZS', purpose: 'Аванс по работам', extra: { contract: 'sherzod' } })}>Выдать аванс<//><${Btn} size="sm" onClick=${() => go({ tg: 'accept' })}>Принять работу<//></div></div></div>`;
+  }
+  const ct = CT[who]; const cs = S.cs[who]; const toPay = cs.accrued - cs.advClosed - cs.hold - cs.paid;
+  return html`<div className="pb-6">
+    <${TgH}>Мой договор<//>
+    <div className="mx-3 bg-white rounded-2xl overflow-hidden"><div className="bg-violet-600 text-white p-4"><div className="text-xs text-violet-200">${ct.model}</div><div className="font-bold">${ct.title}</div><div className="text-xs text-violet-200">заказчик: ${ct.from === 'owner' ? 'Ganiev Development' : P[ct.from].name} · срок ${fdy(ct.due)}</div></div>
+      <div className="p-4"><div className="rounded-xl bg-violet-50 p-3 text-center"><div className="text-[11px] text-violet-700">Ваша ставка</div><div className="num text-3xl font-bold text-violet-900">${money(ct.cur, ct.rate)}<span className="text-base font-semibold">/${ct.unit}</span></div><div className="num text-xs text-violet-700 mt-0.5">${ct.total} ${ct.unit} = ${money(ct.cur, ct.total * ct.rate)}</div></div>
+        <div className="mt-3"><${Row} k="Аванс получен" v=${money(ct.cur, cs.advance)} /><${Row} k="Принято" v=${cs.accVol + ' из ' + ct.total + ' ' + ct.unit} /><${Row} k="Начислено" v=${money(ct.cur, cs.accrued)} /><${Row} k="Зачтено аванса" v=${money(ct.cur, cs.advClosed)} />
+          ${cs.hold > 0 && html`<${Row} k="Удержано до исправления" v=${money(ct.cur, cs.hold)} tone="amber" />`}<${Row} k="Выплачено" v=${money(ct.cur, cs.paid)} /><${Row} k="Осталось получить" v=${money(ct.cur, Math.max(0, toPay))} strong tone="green" /></div>
+        ${lockLine(who === 'nodir' ? 'Цена генподрядчика у клиента скрыта: вы видите только свои $8/м²' : 'Договор прораба с генподрядчиком и его цены скрыты')}</div></div>
+    <div className="mx-3 mt-3"><${Btn} full onClick=${() => go({ tg: 'work' })} icon="check">Сдать работу<//></div></div>`;
+}
+
+function TgRequest() {
+  const c = useC(); const { act, ui, go, say } = c; const who = ui.who;
+  const isBakh = who === 'bakh'; const ct = CT[who];
+  const [kind, setKind] = useState(isBakh ? 'Под отчёт' : 'Аванс');
+  const [mat, setMat] = useState(isBakh ? 2000 : 0); const [wrk, setWrk] = useState(isBakh ? 1000 : 0);
+  const [amount, setAmount] = useState(isBakh ? 3000 : who === 'sherzod' ? 2000000 : 200);
+  const cur = isBakh ? 'USD' : ct.cur;
+  const total = isBakh ? +mat + +wrk : +amount;
+  const to = isBakh ? 'owner' : ct.from;
+  const send = () => {
+    const minor = cur === 'USD' ? Math.round(total * 100) : Math.round(total);
+    act(n => { n.requests.push({ id: uid('r'), from: who, to, kind, amount: minor, cur, parts: isBakh ? 'материалы $' + nf0.format(mat) + ', работы $' + nf0.format(wrk) : 'аванс по договору', status: 'new', contract: isBakh ? null : who }); });
+    say('Запрос отправлен: ' + (to === 'owner' ? 'Джурабек' : P[to].short) + ' увидит его в «Ждёт вас»'); go({ tg: 'home' });
+  };
+  return html`<div>
+    <${TgCard}><div className="text-[11px] text-slate-500 mb-1.5">Назначение</div>
+      <${Seg} small value=${kind} onChange=${setKind} options=${isBakh ? [['Под отчёт', 'Под отчёт'], ['Аванс', 'Аванс'], ['Транш', 'След. транш']] : [['Аванс', 'Аванс по работам']]} />
+      <div className="mt-2 text-[11px] text-slate-500">Кому: ${to === 'owner' ? 'Джурабек Ганиев (Ganiev Development)' : P[to].name}</div><//>
+    ${isBakh ? html`<${TgCard}><div className="text-sm font-semibold text-slate-900">Разбивка <span className="font-normal text-slate-400 text-xs">· по желанию</span></div>
+        <div className="mt-2 grid grid-cols-2 gap-2"><label><span className="text-[11px] text-slate-500">Материалы, $</span><input type="number" className=${cx(inputCls, 'num mt-0.5')} value=${mat} onChange=${e => setMat(e.target.value)} /></label>
+          <label><span className="text-[11px] text-slate-500">Работы, $</span><input type="number" className=${cx(inputCls, 'num mt-0.5')} value=${wrk} onChange=${e => setWrk(e.target.value)} /></label></div>
+        <div className="mt-3 flex justify-between items-baseline"><span className="text-sm text-slate-500">Итого</span><span className="num text-2xl font-bold">${usd(Math.round(total * 100))}</span></div><//>`
+      : html`<${TgCard}><label><span className="text-[11px] text-slate-500">Сумма, ${cur === 'USD' ? '$' : 'сум'}</span><input type="number" className=${cx(inputCls, 'num mt-0.5 text-lg font-semibold')} value=${amount} onChange=${e => setAmount(e.target.value)} /></label><//>`}
+    <p className="mx-4 mt-3 text-[11px] text-slate-400">Запрос необязателен — заказчик может передать деньги и сам. Сумма передачи может отличаться от запрошенной.</p>
+    <${Sticky}><${Btn} full size="lg" icon="send" disabled=${!(total > 0)} onClick=${send}>Отправить запрос<//><//></div>`;
+}
+
+/* ======================================================================
+   Демо-панель и корень
+   ====================================================================== */
+const SCREENS = [
+  ['web', 'projects', '1. Мои проекты'], ['web', 'balance', '2. Проект → Баланс'], ['web', 'contracts', '3. Договоры и цепочка'], ['web', 'smeta', '4. Смета и этапы'],
+  ['web', 'expenses', '5. Расходы: проверка'], ['web', 'works', '6. Работы и приёмка'], ['web', 'report', '7. Отчёт по траншу'], ['web', 'proposal', '8. Предложение заказчику'],
+  ['tg', 'home', '9. Главная исполнителя', 'bakh'], ['tg', 'expense', '10. + Расход одной строкой', 'bakh'], ['tg', 'pod', '11. Подотчёт: 7 цифр', 'bakh'],
+  ['tg', 'work', '12. Сдать работу (кладка)', 'sherzod'], ['tg', 'accept', '13. Приёмка у прораба', 'bakh'], ['tg', 'contracts', '14. Мои договоры: мастер видит $8', 'nodir'], ['tg', 'request', '15. Запросить деньги', 'bakh'],
+];
+function DemoBar() {
+  const { ui, go, reset } = useC();
+  const cur = ui.ch + ':' + (ui.ch === 'web' ? ui.web : ui.tg);
+  return html`<div className="no-print sticky top-0 z-40 bg-slate-950 text-white">
+    <div className="max-w-7xl mx-auto px-3 py-2 flex flex-wrap items-center gap-2">
+      <div className="flex items-center gap-2 mr-1"><span className="rounded bg-orange-600 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide">макет</span><span className="text-xs text-slate-300 hidden md:inline">Tenderlink «Отчётность» · без бэкенда</span></div>
+      <div className="inline-flex rounded-lg bg-white/10 p-0.5 text-xs">
+        <button onClick=${() => go({ ch: 'web' })} className=${cx('rounded-md px-2.5 py-1 font-medium', ui.ch === 'web' ? 'bg-white text-slate-900' : 'text-slate-300')}>Веб-кабинет · менеджер</button>
+        <button onClick=${() => go({ ch: 'tg' })} className=${cx('rounded-md px-2.5 py-1 font-medium', ui.ch === 'tg' ? 'bg-white text-slate-900' : 'text-slate-300')}>Telegram Mini App · исполнитель</button></div>
+      ${ui.ch === 'tg' && html`<select value=${ui.who} onChange=${e => go({ who: e.target.value })} className="rounded-lg bg-white/10 text-xs px-2 py-1.5 text-white [&>option]:text-slate-900">
+        <option value="bakh">Бахтиёр, прораб</option><option value="sherzod">Шерзод, бригадир</option><option value="nodir">Нодир, мастер</option></select>`}
+      <div className="flex-1"></div>
+      <select value=${cur} onChange=${e => { const s = SCREENS.find(x => x[0] + ':' + x[1] === e.target.value); go(s[0] === 'web' ? { ch: 'web', web: s[1] } : { ch: 'tg', tg: s[1], who: s[3], draft: null }); }}
+        className="rounded-lg bg-white/10 text-xs px-2 py-1.5 text-white max-w-[52vw] [&>option]:text-slate-900 [&>optgroup]:text-slate-900">
+        <optgroup label="Веб-кабинет">${SCREENS.filter(s => s[0] === 'web').map(s => html`<option key=${s[1]} value=${s[0] + ':' + s[1]}>${s[2]}</option>`)}</optgroup>
+        <optgroup label="Telegram Mini App">${SCREENS.filter(s => s[0] === 'tg').map(s => html`<option key=${s[1]} value=${s[0] + ':' + s[1]}>${s[2]}</option>`)}</optgroup></select>
+      <button onClick=${reset} className="rounded-lg bg-white/10 hover:bg-white/20 text-xs px-2.5 py-1.5 flex items-center gap-1.5" title="Вернуть исходные данные"><${Icon} n="refresh" s=${13} />Сбросить</button></div></div>`;
+}
+const UI0 = { ch: 'web', web: 'projects', tg: 'home', who: 'bakh', viewAs: 'owner', selContract: 'client', smetaMode: 'internal', expFilter: 'review', expWho: 'all', reportView: 'client', draft: null };
+function App() {
+  const [S, setS] = useState(init);
+  const [ui, setUi] = useState(UI0);
+  const [toast, setToast] = useState(null);
+  const [modal, setModal] = useState(null);
+  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 3400); return () => clearTimeout(t); }, [toast]);
+  const act = fn => setS(p => { const n = structuredClone(p); fn(n); return n; });
+  const go = patch => { setUi(u => ({ ...u, ...patch })); if (patch.web || patch.tg || patch.ch) window.scrollTo(0, 0); };
+  const say = (msg, icon) => setToast({ msg, icon, k: Date.now() });
+  const reset = () => { setS(init()); setUi(u => ({ ...UI0, ch: u.ch })); say('Демо-данные сброшены', 'refresh'); };
+  const ask = spec => setModal(spec ? { ...spec, _k: Date.now() } : null);
+  const ctx = { S, act, ui, go, say, ask, modal, reset };
+  return html`<${Ctx.Provider} value=${ctx}><${DemoBar} />${ui.ch === 'web' ? html`<${Web} />` : html`<${Tg} />`}<${Modal} /><${Toast} t=${toast} /><//>`;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${App} />`);
+</script>
+</body>
+</html>
